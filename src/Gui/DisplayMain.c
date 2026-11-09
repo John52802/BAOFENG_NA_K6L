@@ -293,6 +293,60 @@ extern void DisplayUpdateChFlag(U8 disAB)
 	}
 }
 
+static U8 shownPercent = 0xFF;
+
+/* In the place of the frequency, when a channel shows only its name. */
+static void DrawBatteryPercent(void)
+{
+    String text[8];
+
+    /* A redraw keeps the number on screen: only DisplayBatteryPercentUpdate changes it. */
+    if(shownPercent == 0xFF)
+    {
+        shownPercent = BatteryGetPercent();
+    }
+    sprintf(text, "%3u%%", shownPercent);
+    LCD_DisplayText(39, 56, (U8 *)text, FONTSIZE_16x16, LCD_DIS_NORMAL);
+}
+
+/* Keeps that number current. Does nothing while anything else is using that place. */
+extern void DisplayBatteryPercentUpdate(void)
+{
+    String nameBuf[16] = {0};
+    U8 line = g_ChannelVfoInfo.switchAB;
+    U8 mode = line ? g_radioInform.channleDisB : g_radioInform.channleDisA;
+    U8 percent;
+
+    if(g_sysRunPara.sysRunMode != MODE_MAIN || g_radioInform.dualRxFlag != 0 || mode != CH_DISNAME
+       || g_ChannelVfoInfo.chVfoInfo[line].chVfoMode != CHAN_MODE || g_rfState == RF_TX
+       || FillChannelName2Buf(g_ChannelVfoInfo.chVfoInfo[line].channelName, nameBuf) != TRUE)
+    {
+        return;
+    }
+    percent = BatteryGetPercent();
+    /* Moves one at a time, and only once the average is 2 away, so a value right between two
+       numbers doesn't keep flipping. */
+    if(shownPercent == 0xFF)
+    {
+        shownPercent = percent;
+    }
+    else if(percent >= shownPercent + 2)
+    {
+        shownPercent++;
+    }
+    else if(percent + 2 <= shownPercent)
+    {
+        shownPercent--;
+    }
+    else
+    {
+        return;
+    }
+    LCD_ClearArea(35, 30, 98, 21);
+    DrawBatteryPercent();
+    LCD_UpdateWorkAre();
+}
+
 extern void DisplayChannelMsg(U8 disMode,U8 disAB, U8 txOrRx)
 {
     String nameBuf[16] = {0};
@@ -304,7 +358,11 @@ extern void DisplayChannelMsg(U8 disMode,U8 disAB, U8 txOrRx)
         if(g_radioInform.dualRxFlag == 0)
         {
             ypox = 39;
-            disMode = CH_DISFREQ;
+            /* A channel set to show its name hides the frequency. The name is already at the top. */
+            if(disMode != CH_DISNAME)
+            {
+                disMode = CH_DISFREQ;
+            }
             clrY = 39;
         }
         else     
@@ -330,7 +388,11 @@ extern void DisplayChannelMsg(U8 disMode,U8 disAB, U8 txOrRx)
         if(g_radioInform.dualRxFlag == 0)
         {
             ypox = 39;
-            disMode = CH_DISFREQ;
+            /* A channel set to show its name hides the frequency. The name is already at the top. */
+            if(disMode != CH_DISNAME)
+            {
+                disMode = CH_DISFREQ;
+            }
             clrY = 39;
         }
         else
@@ -381,7 +443,14 @@ extern void DisplayChannelMsg(U8 disMode,U8 disAB, U8 txOrRx)
     }
     else if(disMode == CH_DISNAME && FillChannelName2Buf(g_ChannelVfoInfo.chVfoInfo[disAB].channelName,nameBuf) == TRUE)
     {//显示信道名称
-        LCD_DisplayText(ypox,30,(U8 *)nameBuf,FONTSIZE_16x16,LCD_DIS_NORMAL);
+        if(g_radioInform.dualRxFlag != 0)
+        {
+            LCD_DisplayText(ypox,30,(U8 *)nameBuf,FONTSIZE_16x16,LCD_DIS_NORMAL);
+        }
+        else
+        {
+            DrawBatteryPercent();
+        }
     }
     else if(disMode == CH_DISCHNUM)
     {
@@ -923,7 +992,7 @@ extern void DisplaySoftVersion(void)
     LCD_DisplayText(4,60-(len<<2),disbuf,FONTSIZE_16x16,LCD_DIS_NORMAL);  
   
     //显示版本号
-    sprintf((String *)&disbuf,"VER:%s","L1.3c" );
+    sprintf((String *)&disbuf,"VER:%s","L1.4d" );
     LCD_DisplayText(24,28,disbuf,FONTSIZE_16x16,LCD_DIS_NORMAL);  
 
     //显示国家码

@@ -18,6 +18,52 @@ extern void BatteryInitLevel(void)
     BatteryGetLevel();
 }
 
+#define PERCENT_AVERAGE 128 /* Readings that weigh in the average (about a minute), and its scale. */
+
+static U16 averageVolt;
+
+/* The single reading moves a few units all the time, so the percentage uses a slow average. */
+extern void BatteryAverageAdd(void)
+{
+    if(averageVolt == 0)
+    {
+        averageVolt = (U16)battery.CurVolt * PERCENT_AVERAGE;
+    }
+    else
+    {
+        averageVolt = averageVolt - averageVolt / PERCENT_AVERAGE + battery.CurVolt;
+    }
+}
+
+/* Percentage from this radio's own calibrated levels. Approximate: it comes from the voltage. */
+extern U8 BatteryGetPercent(void)
+{
+    static const U8 percentAt[BAT_LEVEL_NUM - 1] = {0, 5, 25, 50, 75, 100};
+    U8 i;
+    U32 volt, low, high, value;
+
+    if(averageVolt == 0)
+    {
+        BatteryAverageAdd();
+    }
+    volt = averageVolt;
+    if(volt <= (U32)battery.voltList[BATT_low] * PERCENT_AVERAGE)
+    {
+        return 0;
+    }
+    for(i = 0; i < BAT_LEVEL_NUM - 2; i++)
+    {
+        low = (U32)battery.voltList[i] * PERCENT_AVERAGE;
+        high = (U32)battery.voltList[i + 1] * PERCENT_AVERAGE;
+        if(volt <= high && high > low)
+        {
+            value = percentAt[i] + (percentAt[i + 1] - percentAt[i]) * (volt - low) / (high - low);
+            return (U8)value;
+        }
+    }
+    return 100;
+}
+
 extern Boolean CheckBatteryCanTx(void)
 {
     if(battery.batteryLevel >= BATT_LOWSTOP)
@@ -123,6 +169,8 @@ extern void BatteryCheckTask(void)
 
 
     BatteryGetLevel();
+    BatteryAverageAdd();
+    DisplayBatteryPercentUpdate();
 
     if(battery.batteryLevel == BATT_LOWFLASH || battery.batteryLevel == BATT_LOWSTOP)
     {

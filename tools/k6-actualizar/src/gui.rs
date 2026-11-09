@@ -2,7 +2,7 @@
 //! thread and reports through `crate::Msg`; a timer in the window collects those messages.
 
 use crate::channels::{self, Channel};
-use crate::{logo, settings, vfo};
+use crate::{logo, settings, theme, vfo};
 use crate::{list_ports, run_action, set_sink, Action, Language, Msg};
 use native_windows_gui as nwg;
 use std::cell::{Cell, RefCell};
@@ -45,6 +45,7 @@ struct Ui {
     port_label: nwg::Label,
     port: nwg::ComboBox<String>,
     refresh: nwg::Button,
+    dark: nwg::CheckBox,
     tabs: nwg::TabsContainer,
 
     tab_radio: nwg::Tab,
@@ -116,6 +117,14 @@ struct Ui {
     vfo_mute: [nwg::ComboBox<String>; 2],
     vfo_read: nwg::Button,
     vfo_save: nwg::Button,
+    vfo_channel_label: nwg::Label,
+    vfo_channel: nwg::ComboBox<String>,
+    vfo_to_a: nwg::Button,
+    vfo_to_b: nwg::Button,
+    vfo_import: nwg::Button,
+    vfo_export: nwg::Button,
+    vfo_open: nwg::FileDialog,
+    vfo_saveas: nwg::FileDialog,
     vfo_hint: nwg::Label,
     vfo_data: RefCell<Option<Vec<u8>>>,
 
@@ -212,6 +221,12 @@ impl Ui {
         let has_vfo = self.vfo_data.borrow().is_some();
         self.vfo_read.set_enabled(has_port);
         self.vfo_save.set_enabled(has_port && has_vfo);
+        let has_channels = !self.channels.borrow().is_empty();
+        self.vfo_channel.set_enabled(idle && has_vfo && has_channels);
+        self.vfo_to_a.set_enabled(idle && has_vfo && has_channels);
+        self.vfo_to_b.set_enabled(idle && has_vfo && has_channels);
+        self.vfo_import.set_enabled(idle && has_vfo);
+        self.vfo_export.set_enabled(idle && has_vfo);
         for i in 0..vfo::VFO_COUNT {
             self.vfo_freq[i].set_enabled(idle && has_vfo);
             self.vfo_rx_tone[i].set_enabled(idle && has_vfo);
@@ -224,13 +239,14 @@ impl Ui {
             self.vfo_mute[i].set_enabled(idle && has_vfo);
         }
         let has_logo = self.logo_loaded.borrow().is_some();
-        let has_picture = self.logo_gray.borrow().is_some();
         self.logo_read.set_enabled(has_port);
         self.logo_choose.set_enabled(idle && has_logo);
         self.logo_export.set_enabled(idle && has_logo);
         self.logo_save.set_enabled(has_port && has_logo);
-        self.logo_invert.set_enabled(idle && has_picture);
-        self.logo_dither.set_enabled(idle && has_picture);
+        // Always enabled, as they do nothing without a picture: disabled check boxes look jagged
+        // in dark mode.
+        self.logo_invert.set_enabled(idle);
+        self.logo_dither.set_enabled(idle);
         for b in &self.setting_boxes {
             b.set_enabled(idle && has_settings);
         }
@@ -310,7 +326,7 @@ impl Ui {
             *self.settings_data.borrow_mut() = Some(data);
         }
         if let Some(data) = vfo_read {
-            self.show_vfos(&data);
+            self.show_vfos(&vfo::parse(&data));
             *self.vfo_data.borrow_mut() = Some(data);
         }
         if let Some(data) = logo_read {
@@ -421,9 +437,9 @@ impl Ui {
         }
     }
 
-    fn show_vfos(&self, data: &[u8]) {
+    fn show_vfos(&self, list: &[vfo::Vfo]) {
         let in_list = |v: u8, n: usize| ((v as usize) < n).then_some(v as usize);
-        for (i, v) in vfo::parse(data).iter().enumerate() {
+        for (i, v) in list.iter().enumerate() {
             self.vfo_freq[i].set_text(&vfo::format_freq(v.freq));
             self.vfo_rx_tone[i].set_text(&channels::format_tone(v.rx_tone));
             self.vfo_tx_tone[i].set_text(&channels::format_tone(v.tx_tone));
@@ -461,6 +477,74 @@ impl Ui {
             v.mute = pick(&self.vfo_mute[i], v.mute);
         }
         Ok(list)
+    }
+
+    fn on_channel_to_vfo(&self, line: usize) {
+        let Some(loaded) = self.vfo_data.borrow().clone() else { return };
+        let Some(at) = self.vfo_channel.selection() else {
+            self.message("Elige un canal de la lista.", nwg::MessageIcons::Warning);
+            return;
+        };
+        let list = self.channels.borrow();
+        let Some(channel) = list.get(at) else { return };
+        // The other line keeps what's on screen, if that's valid so far.
+        let mut vfos = self.edited_vfos(&loaded).unwrap_or_else(|_| vfo::parse(&loaded));
+        match vfo::from_channel(channel, &vfos[line]) {
+            Ok(v) => {
+                vfos[line] = v;
+                self.show_vfos(&vfos);
+                self.status.set_text(&format!(
+                    "Canal {} pasado a la línea {}. Pendiente: \"Guardar en radio\".",
+                    channel.number,
+                    ["A", "B"][line]
+                ));
+            }
+            Err(e) => self.message(&e, nwg::MessageIcons::Warning),
+        }
+    }
+
+    fn on_import_vfos(&self) {
+        let Some(loaded) = self.vfo_data.borrow().clone() else { return };
+        if !self.vfo_open.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.vfo_open.get_selected_item() else { return };
+        // A line not in the file keeps what's on screen, if that's valid so far.
+        let current = self.edited_vfos(&loaded).unwrap_or_else(|_| vfo::parse(&loaded));
+        let result = fs::read(&file)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map_err(|e| format!("No se pudo leer el archivo: {e}"))
+            .and_then(|text| vfo::from_csv(&text, &current));
+        match result {
+            Ok(list) => {
+                self.show_vfos(&list);
+                self.status.set_text("VFO importados. Pendiente: \"Guardar en radio\".");
+            }
+            Err(e) => self.message(&e, nwg::MessageIcons::Error),
+        }
+    }
+
+    fn on_export_vfos(&self) {
+        let Some(loaded) = self.vfo_data.borrow().clone() else { return };
+        let list = match self.edited_vfos(&loaded) {
+            Ok(list) => list,
+            Err(e) => {
+                self.message(&e, nwg::MessageIcons::Warning);
+                return;
+            }
+        };
+        if !self.vfo_saveas.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.vfo_saveas.get_selected_item() else { return };
+        let mut path = PathBuf::from(file);
+        if path.extension().is_none() {
+            path.set_extension("csv");
+        }
+        match fs::write(&path, vfo::to_csv(&list)) {
+            Ok(()) => self.status.set_text(&format!("Exportado: {}", path.display())),
+            Err(e) => self.message(&format!("No se pudo guardar: {e}"), nwg::MessageIcons::Error),
+        }
     }
 
     fn on_save_vfos(&self) {
@@ -753,6 +837,15 @@ impl Ui {
     }
 
     fn fill_list(&self) {
+        let names: Vec<String> = self
+            .channels
+            .borrow()
+            .iter()
+            .map(|c| format!("{:03}  {}  {}", c.number, channels::format_mhz(c.rx), c.name))
+            .collect();
+        self.vfo_channel.set_collection(names);
+        self.vfo_channel.set_selection(None);
+        self.update_enabled();
         self.list.clear();
         for c in self.channels.borrow().iter() {
             let row = [
@@ -952,6 +1045,13 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::Label::builder().text("Puerto COM:").position((16, 40)).size((90, 22)).parent(w).build(&mut ui.port_label)?;
     nwg::ComboBox::builder().position((110, 36)).size((220, 26)).parent(w).build(&mut ui.port)?;
     nwg::Button::builder().text("Actualizar lista").position((340, 35)).size((130, 28)).parent(w).build(&mut ui.refresh)?;
+    nwg::CheckBox::builder()
+        .text("Modo oscuro")
+        .position((490, 37))
+        .size((130, 24))
+        .check_state(if theme::saved_dark() { nwg::CheckBoxState::Checked } else { nwg::CheckBoxState::Unchecked })
+        .parent(w)
+        .build(&mut ui.dark)?;
 
     nwg::TabsContainer::builder().position((12, 72)).size((716, 340)).parent(w).build(&mut ui.tabs)?;
     nwg::Tab::builder().text("Radio").parent(&ui.tabs).build(&mut ui.tab_radio)?;
@@ -1114,14 +1214,16 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     }
     nwg::Button::builder().text("Leer del radio").position((510, 30)).size((180, 32)).parent(t).build(&mut ui.vfo_read)?;
     nwg::Button::builder().text("Guardar en radio").position((510, 70)).size((180, 32)).parent(t).build(&mut ui.vfo_save)?;
+    nwg::Button::builder().text("Importar CSV...").position((700, 30)).size((180, 32)).parent(t).build(&mut ui.vfo_import)?;
+    nwg::Button::builder().text("Exportar CSV...").position((700, 70)).size((180, 32)).parent(t).build(&mut ui.vfo_export)?;
+    nwg::Label::builder().text("Canal:").position((510, 113)).size((50, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.vfo_channel_label)?;
+    nwg::ComboBox::builder().position((562, 110)).size((318, 26)).parent(t).build(&mut ui.vfo_channel)?;
+    nwg::Button::builder().text("Pasar a línea A").position((510, 142)).size((180, 30)).parent(t).build(&mut ui.vfo_to_a)?;
+    nwg::Button::builder().text("Pasar a línea B").position((700, 142)).size((180, 30)).parent(t).build(&mut ui.vfo_to_b)?;
     nwg::Label::builder()
-        .text("Cada línea guarda su frecuencia y opciones. Se usan con esa línea en modo frecuencia (V/M).
-
-Tonos: 88.5 (CTCSS), D023N o D023I (DCS). Vacío: sin tono.
-
-Dirección y desplazamiento: para transmitir en otra frecuencia, como con un repetidor. Por ejemplo, - y 0.6.")
-        .position((510, 112))
-        .size((460, 180))
+        .text("Solo hay dos líneas. Para pasar un canal, léelos antes en la pestaña Canales.\r\n\r\nTonos: 88.5 (CTCSS), D023N o D023I (DCS). Vacío: sin tono.\r\n\r\nDirección y desplazamiento: para transmitir en otra frecuencia, como con un repetidor. Por ejemplo, - y 0.6.")
+        .position((510, 178))
+        .size((470, 136))
         .background_color(Some([255, 255, 255]))
         .parent(t)
         .build(&mut ui.vfo_hint)?;
@@ -1193,6 +1295,16 @@ Dirección y desplazamiento: para transmitir en otra frecuencia, como con un rep
         .filters("Imágenes (*.png;*.jpg;*.jpeg;*.bmp;*.gif)|Todos (*.*)")
         .build(&mut ui.logo_open)?;
     nwg::FileDialog::builder()
+        .title("Importar VFO")
+        .action(nwg::FileDialogAction::Open)
+        .filters("CSV (*.csv)|Todos (*.*)")
+        .build(&mut ui.vfo_open)?;
+    nwg::FileDialog::builder()
+        .title("Exportar VFO")
+        .action(nwg::FileDialogAction::Save)
+        .filters("CSV (*.csv)")
+        .build(&mut ui.vfo_saveas)?;
+    nwg::FileDialog::builder()
         .title("Exportar logo")
         .action(nwg::FileDialogAction::Save)
         .filters("BMP (*.bmp)")
@@ -1212,6 +1324,9 @@ pub fn run() {
         return;
     }
     let ui = Rc::new(ui);
+    let pages = [ui.tab_radio.handle, ui.tab_channels.handle, ui.tab_settings.handle, ui.tab_vfo.handle, ui.tab_logo.handle];
+    theme::install(&ui.window, &ui.tabs, &pages);
+    theme::apply(&ui.window, theme::saved_dark(), false);
     ui.layout();
     ui.refresh_ports();
     ui.message(MODEL_NOTICE, nwg::MessageIcons::Warning);
@@ -1245,6 +1360,8 @@ pub fn run() {
             nwg::Event::OnButtonClick => {
                 if handle == ui.refresh.handle {
                     ui.refresh_ports();
+                } else if handle == ui.dark.handle {
+                    theme::apply(&ui.window, ui.dark.check_state() == nwg::CheckBoxState::Checked, true);
                 } else if handle == ui.backup.handle {
                     ui.start(Action::Backup);
                 } else if handle == ui.fw_browse.handle {
@@ -1279,6 +1396,14 @@ pub fn run() {
                     ui.start(Action::ReadVfo);
                 } else if handle == ui.vfo_save.handle {
                     ui.on_save_vfos();
+                } else if handle == ui.vfo_to_a.handle {
+                    ui.on_channel_to_vfo(0);
+                } else if handle == ui.vfo_to_b.handle {
+                    ui.on_channel_to_vfo(1);
+                } else if handle == ui.vfo_import.handle {
+                    ui.on_import_vfos();
+                } else if handle == ui.vfo_export.handle {
+                    ui.on_export_vfos();
                 } else if handle == ui.logo_read.handle {
                     ui.start(Action::ReadLogo);
                 } else if handle == ui.logo_choose.handle {

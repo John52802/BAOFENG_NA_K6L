@@ -20,6 +20,7 @@ Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/
 - Textos en español: `MENU` > `Language` > `Español`.
 - Voces en español en una zona libre de la memoria flash, sin borrar las de fábrica. El código fuente no incluye los audios; el `.exe` de las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases) sí.
 - Vista aproximada de espectro (mantener `1` o pulsar `BAND`). Indica actividad, no una frecuencia exacta: el error medido fue de unos 275 kHz en el ancho de 2 MHz y de unos 3 MHz en el de 10 MHz.
+- En modo canal, con la pantalla en Nombre y sin doble escucha, oculta la frecuencia y muestra un porcentaje aproximado de batería. Solo la oculta de la vista: no da privacidad en el aire.
 - El silenciador se respeta por debajo de 130 MHz, y el escaneo por frecuencia ya no graba en la flash a cada paso.
 
 ## Fallos corregidos del firmware base
@@ -45,7 +46,7 @@ Con el cable de programación conectado, enciende el radio con los 2 botones lat
 
 ## Programa para Windows
 
-`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces, edita canales con sus tonos CTCSS y DCS, potencia, ancho de banda y demás opciones, edita los VFO A y B, y cambia los ajustes del radio, la clave, el mensaje y el logo de encendido. Solo escribe en las zonas de voces, canales y logo de la memoria flash externa, los ajustes los guarda el propio firmware, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
+`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces, edita canales con sus tonos CTCSS y DCS, potencia, ancho de banda y demás opciones, edita los VFO A y B, tiene modo oscuro, y cambia los ajustes del radio, la clave, el mensaje y el logo de encendido. Solo escribe en las zonas de voces, canales y logo de la memoria flash externa, los ajustes los guarda el propio firmware, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
 
 Para compilarlo desde `tools/k6-actualizar`:
 

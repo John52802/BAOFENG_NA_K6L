@@ -50,6 +50,7 @@ mod channels;
 mod gui;
 mod logo;
 mod settings;
+mod theme;
 mod vfo;
 
 // Built-in files, present only when build.rs finds them in out/. Without them the program

@@ -28,6 +28,8 @@ typedef struct
 extern const U8  *battIcon[];
 
 extern STR_BATTERY battery;
+extern void BatteryAverageAdd(void);
+extern U8 BatteryGetPercent(void);
 
 typedef struct
 {  

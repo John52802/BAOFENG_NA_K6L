@@ -160,6 +160,117 @@ pub fn apply(loaded: &[u8], vfos: &[Vfo]) -> Res<Vec<u8>> {
     Ok(out)
 }
 
+/// A VFO line set up like a channel. A channel's TX frequency becomes the VFO's direction and
+/// offset, which is how a VFO stores it, so a listen-only channel stays that way. The step isn't
+/// part of a channel, so the line keeps its own.
+pub fn from_channel(c: &channels::Channel, current: &Vfo) -> Res<Vfo> {
+    let (direction, offset) = match c.tx.cmp(&c.rx) {
+        std::cmp::Ordering::Equal => (0, 0),
+        std::cmp::Ordering::Greater => (1, c.tx - c.rx),
+        std::cmp::Ordering::Less => (2, c.rx - c.tx),
+    };
+    if offset % OFFSET_UNIT != 0 || offset > OFFSET_MAX {
+        return Err(format!("El VFO no puede guardar la diferencia entre RX y TX del canal {}.", c.number));
+    }
+    // Options the channel holds as unusual values don't carry over.
+    let known = |value: u8, options: &[&str], old: u8| if (value as usize) < options.len() { value } else { old };
+    Ok(Vfo {
+        freq: c.rx,
+        rx_tone: c.rx_tone,
+        tx_tone: c.tx_tone,
+        direction,
+        offset,
+        power: known(c.options[0], POWERS, current.power),
+        narrow: known(c.options[1], WIDTHS, current.narrow),
+        step: current.step,
+        mute: known(c.options[4], MUTES, current.mute),
+    })
+}
+
+/// Spreadsheets can mangle accents, and only the plain letters matter to tell options apart.
+fn plain(text: &str) -> String {
+    text.trim().to_lowercase().replace('ñ', "n").replace(',', ".")
+}
+
+fn option_text(value: u8, options: &[&str]) -> String {
+    options.get(value as usize).map_or(String::new(), |t| plain(t))
+}
+
+fn parse_option(row: usize, label: &str, text: &str, old: u8, options: &[&str]) -> Res<u8> {
+    if text.trim().is_empty() {
+        return Ok(old);
+    }
+    let wanted = plain(text);
+    let at = options.iter().position(|o| plain(o) == wanted);
+    at.map(|v| v as u8).ok_or_else(|| format!("Fila {row}: {label} no válido: \"{text}\""))
+}
+
+/// One row per line. An unusual stored option leaves its column empty, which keeps it on import.
+pub fn to_csv(vfos: &[Vfo]) -> String {
+    let mut s = String::from("linea,frecuencia_mhz,tono_rx,tono_tx,direccion,desplazamiento_mhz,potencia,ancho,paso,silencio\r\n");
+    for (v, line) in vfos.iter().zip(["A", "B"]) {
+        s.push_str(&format!(
+            "{line},{},{},{},{},{},{},{},{},{}\r\n",
+            format_freq(v.freq),
+            channels::format_tone(v.rx_tone),
+            channels::format_tone(v.tx_tone),
+            option_text(v.direction, DIRECTIONS),
+            format_offset(v.offset),
+            option_text(v.power, POWERS),
+            option_text(v.narrow, WIDTHS),
+            option_text(v.step, STEPS),
+            option_text(v.mute, MUTES),
+        ));
+    }
+    s
+}
+
+/// Reads a file from `to_csv` over `current`, all or nothing. A missing line, or an empty option
+/// or frequency, keeps what `current` has; an empty tone or offset means none. Spreadsheets may
+/// use ';' as the separator.
+pub fn from_csv(text: &str, current: &[Vfo]) -> Res<Vec<Vfo>> {
+    let mut out = current.to_vec();
+    let mut seen = [false; VFO_COUNT];
+    for (i, row_text) in text.lines().enumerate() {
+        let row_text = row_text.trim().trim_start_matches('\u{feff}');
+        if row_text.is_empty() || (i == 0 && row_text.to_lowercase().starts_with("linea")) {
+            continue;
+        }
+        let row = i + 1;
+        let sep = if row_text.contains(';') { ';' } else { ',' };
+        let f: Vec<&str> = row_text.split(sep).map(str::trim).collect();
+        if f.len() != 10 {
+            return Err(format!("Fila {row}: se esperaban 10 columnas, como en un archivo exportado"));
+        }
+        let at = match f[0].to_uppercase().as_str() {
+            "A" => 0,
+            "B" => 1,
+            other => return Err(format!("Fila {row}: la línea debe ser A o B, no \"{other}\"")),
+        };
+        if seen[at] {
+            return Err(format!("Fila {row}: la línea {} está repetida", f[0]));
+        }
+        seen[at] = true;
+        let with_row = |e: String| format!("Fila {row}: {e}");
+        let v = &mut out[at];
+        if !f[1].is_empty() {
+            v.freq = parse_mhz(f[1]).map_err(with_row)?;
+        }
+        v.rx_tone = channels::parse_tone(f[2]).map_err(with_row)?;
+        v.tx_tone = channels::parse_tone(f[3]).map_err(with_row)?;
+        v.direction = parse_option(row, "Dirección", f[4], v.direction, DIRECTIONS)?;
+        v.offset = parse_offset(f[5]).map_err(with_row)?;
+        v.power = parse_option(row, "Potencia", f[6], v.power, POWERS)?;
+        v.narrow = parse_option(row, "Ancho", f[7], v.narrow, WIDTHS)?;
+        v.step = parse_option(row, "Paso", f[8], v.step, STEPS)?;
+        v.mute = parse_option(row, "Silencio", f[9], v.mute, MUTES)?;
+    }
+    if !seen.iter().any(|&x| x) {
+        return Err("El archivo no contiene ninguna línea de VFO.".into());
+    }
+    Ok(out)
+}
+
 pub fn read_from_radio(link: &mut dyn Link) -> Res<Vec<u8>> {
     say!("Leyendo VFO...");
     settings::enter(link)?;
@@ -335,6 +446,90 @@ mod tests {
         odd[19] = 8; // A step the firmware has but the menu doesn't offer.
         odd[8..10].copy_from_slice(&643u16.to_le_bytes());
         assert_eq!(apply(&odd, &parse(&odd)).unwrap(), odd);
+    }
+
+    #[test]
+    fn files_round_trip_and_spreadsheets_can_edit_them() {
+        let mut v = parse(&real());
+        v[0] = Vfo { freq: 14_550_000, rx_tone: 885, tx_tone: 106, direction: 2, offset: 60_000, power: 1, narrow: 1, step: 6, mute: 1 };
+        assert_eq!(from_csv(&to_csv(&v), &parse(&real())).unwrap(), v);
+
+        let got = from_csv("\u{feff}linea;frecuencia_mhz;tono_rx;tono_tx;direccion;desplazamiento_mhz;potencia;ancho;paso;silencio\r\nb;118,3;;;SIN DESPLAZ.;;BAJA;Ancha;25 KHZ;Tono\r\n", &v).unwrap();
+        assert_eq!(got[0], v[0], "A line not in the file stays");
+        assert_eq!(got[1].freq, 11_830_000);
+        assert_eq!((got[1].power, got[1].step), (1, 6));
+
+        // Empty options keep what's there, and an unusual stored value survives the trip.
+        let mut odd = parse(&real());
+        odd[0].step = 8;
+        let back = from_csv(&to_csv(&odd), &odd).unwrap();
+        assert_eq!(back[0].step, 8);
+    }
+
+    #[test]
+    fn the_file_given_to_the_user_is_valid() {
+        let text = "linea,frecuencia_mhz,tono_rx,tono_tx,direccion,desplazamiento_mhz,potencia,ancho,paso,silencio
+A,118.3,,,sin desplaz.,0,baja,ancha,25 khz,tono
+B,121.5,,,sin desplaz.,0,baja,ancha,25 khz,tono
+";
+        let got = from_csv(text, &parse(&real())).unwrap();
+        assert_eq!((got[0].freq, got[1].freq), (11_830_000, 12_150_000));
+        assert_eq!((got[0].power, got[0].step, got[0].direction, got[0].offset), (1, 6, 0, 0));
+        assert_eq!(apply(&real(), &got).unwrap()[..8], [1, 1, 8, 3, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_channel_becomes_a_vfo_line() {
+        let mut current = parse(&real())[0].clone();
+        current.step = 6;
+        let base = channels::Channel { number: 7, rx: 14_550_000, tx: 14_550_000, ..Default::default() };
+
+        let v = from_channel(&base, &current).unwrap();
+        assert_eq!((v.freq, v.direction, v.offset, v.step), (14_550_000, 0, 0, 6));
+
+        let up = channels::Channel { tx: 15_000_000, ..base.clone() };
+        assert_eq!(from_channel(&up, &current).map(|v| (v.direction, v.offset)).unwrap(), (1, 450_000));
+
+        // A listen-only channel: its blocked TX frequency survives as direction and offset.
+        let listen = channels::Channel { rx: 15_680_000, tx: 12_500_000, ..base.clone() };
+        let v = from_channel(&listen, &current).unwrap();
+        assert_eq!((v.direction, v.offset), (2, 3_180_000));
+        assert_eq!(v.freq - v.offset, 12_500_000);
+
+        let full = channels::Channel { rx_tone: 885, tx_tone: 1, options: [1, 1, 0, 1, 1, 0], ..base.clone() };
+        let v = from_channel(&full, &current).unwrap();
+        assert_eq!((v.rx_tone, v.tx_tone, v.power, v.narrow, v.mute), (885, 1, 1, 1, 1));
+        let d = real();
+        let mut list = parse(&d);
+        list[0] = v;
+        assert_eq!(parse(&apply(&d, &list).unwrap())[0], list[0], "What it gives can be saved");
+
+        // Finer than the 100 Hz a VFO offset can hold, and an odd stored power.
+        assert!(from_channel(&channels::Channel { tx: 14_550_005, ..base.clone() }, &current).is_err());
+        current.power = 1;
+        let odd = channels::Channel { options: [3, 0, 0, 1, 0, 0], ..base };
+        assert_eq!(from_channel(&odd, &current).unwrap().power, 1);
+    }
+
+    #[test]
+    fn a_bad_file_changes_nothing() {
+        let v = parse(&real());
+        for bad in [
+            "",
+            "linea,frecuencia_mhz\r\n",
+            "C,145,,,,,,,,",
+            "A,145",
+            "A,50,,,,,,,,",
+            "A,145,abc,,,,,,,",
+            "A,145,,,arriba,,,,,",
+            "A,145,,,,0.12345,,,,",
+            "A,145,,,,,media,,,",
+            "A,145,,,,,,,3 kHz,",
+            "A,145,,,,,,,,,",
+            "A,145,,,,,,,,\nA,146,,,,,,,,",
+        ] {
+            assert!(from_csv(bad, &v).is_err(), "{bad}");
+        }
     }
 
     #[test]
