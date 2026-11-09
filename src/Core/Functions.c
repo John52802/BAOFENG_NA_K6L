@@ -68,6 +68,17 @@ extern void KeyLockFunSwitch(void)
 {
     if(g_radioInform.keyLock)
     {
+        /* With a power-on password set, the same password unlocks the keypad. */
+        if(g_radioInform.pwrPwdFlag != 0 && g_radioInform.pwrPwdFlag != 0xFF)
+        {
+            U8 result = PasswordPrompt(1);
+
+            DisplayHomePage();
+            if(result != OK)
+            {
+                return;
+            }
+        }
         g_radioInform.keyLock = 0;
         Audio_PlayVoice(vo_unlock);
     }

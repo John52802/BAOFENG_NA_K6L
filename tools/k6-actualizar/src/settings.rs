@@ -169,7 +169,42 @@ pub fn check_message(text: &str) -> Res<()> {
     Ok(())
 }
 
-pub const PASSWORD_HELP: &str = "Con Sí, el radio pide esta clave de 6 números al encender, y no se conecta al PC hasta recibirla. Anótala.";
+pub const SCAN_HELP: &str = "Rango en MHz que recorre el escaneo en modo VFO, como 400-470. Sin decimales.";
+const SCAN_KEY: &str = "vfoScan";
+const SCAN_LOW_AT: usize = 44; // vfoScanRangeL and H: whole MHz, see SaveVfoScanRanger.
+const SCAN_HIGH_AT: usize = 46;
+const SCAN_MIN_MHZ: u16 = 100; // The receive range of this firmware.
+const SCAN_MAX_MHZ: u16 = 999;
+
+pub fn scan_range(data: &[u8]) -> String {
+    let low = u16::from_le_bytes([data[SCAN_LOW_AT], data[SCAN_LOW_AT + 1]]);
+    let high = u16::from_le_bytes([data[SCAN_HIGH_AT], data[SCAN_HIGH_AT + 1]]);
+    format!("{low}-{high}")
+}
+
+fn parse_scan_range(text: &str) -> Res<(u16, u16)> {
+    let bad = || format!("Rango de escaneo no válido: \"{text}\". Por ejemplo 400-470, entre {SCAN_MIN_MHZ} y {SCAN_MAX_MHZ} MHz.");
+    let (low, high) = text.trim().split_once('-').ok_or_else(bad)?;
+    let low: u16 = low.trim().parse().map_err(|_| bad())?;
+    let high: u16 = high.trim().parse().map_err(|_| bad())?;
+    if low < SCAN_MIN_MHZ || high > SCAN_MAX_MHZ || low >= high {
+        return Err(bad());
+    }
+    Ok((low, high))
+}
+
+/// Nothing changes unless the text differs from what the radio holds, whatever that is.
+pub fn apply_scan_range(data: &[u8], text: &str) -> Res<Vec<u8>> {
+    let mut out = data.to_vec();
+    if text.trim() != scan_range(data) {
+        let (low, high) = parse_scan_range(text)?;
+        out[SCAN_LOW_AT..SCAN_LOW_AT + 2].copy_from_slice(&low.to_le_bytes());
+        out[SCAN_HIGH_AT..SCAN_HIGH_AT + 2].copy_from_slice(&high.to_le_bytes());
+    }
+    Ok(out)
+}
+
+pub const PASSWORD_HELP: &str = "Con Sí, el radio pide esta clave de 6 números al encender, y no se conecta al PC hasta recibirla. También la pide para desbloquear el teclado. Anótala.";
 const PASSWORD_FLAG_AT: usize = 60; // pwrPwdFlag.
 const PASSWORD_AT: usize = 61; // pwrPassword: 6 digits in 3 bytes, see CheckInputPassWord.
 
@@ -254,6 +289,20 @@ pub fn to_csv(choices: &[Option<usize>], text: &str) -> String {
     out
 }
 
+/// The settings file, with the VFO scan range as one more row.
+pub fn to_full_csv(choices: &[Option<usize>], text: &str, scan: &str) -> String {
+    format!("{}{SCAN_KEY},Escaneo VFO,{scan},\r\n", to_csv(choices, text))
+}
+
+/// The scan range in a settings file, if it has one. `from_csv` has already checked it.
+pub fn scan_from_csv(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let sep = if line.contains(';') { ';' } else { ',' };
+        let cols: Vec<&str> = line.split(sep).map(str::trim).collect();
+        (cols.len() >= 3 && cols[0] == SCAN_KEY && !cols[2].is_empty()).then(|| cols[2].to_string())
+    })
+}
+
 /// Reads a file from `to_csv`, all or nothing. Settings missing from it stay as `None`, which
 /// `apply` leaves alone, and so does an empty or missing message. Spreadsheets may use ';' as the
 /// separator.
@@ -273,6 +322,16 @@ pub fn from_csv(text: &str) -> Res<(Vec<Option<usize>>, Option<String>)> {
         let cols: Vec<&str> = line.split(sep).map(str::trim).collect();
         if cols.len() < 3 {
             return Err(format!("Fila {row}: se esperaban clave, nombre y valor"));
+        }
+        if cols[0] == SCAN_KEY {
+            // An odd range a radio already holds round-trips through `apply_scan_range`, which
+            // doesn't read it when it's unchanged, so only its shape is checked here.
+            let looks_right = cols[2].is_empty() || cols[2].split_once('-').is_some_and(|(a, b)| a.trim().parse::<u16>().is_ok() && b.trim().parse::<u16>().is_ok());
+            if !looks_right {
+                return Err(format!("Fila {row}: rango de escaneo no válido: \"{}\"", cols[2]));
+            }
+            found += 1;
+            continue;
         }
         if cols[0] == MESSAGE_KEY {
             if message_seen {
@@ -621,6 +680,34 @@ mod tests {
         let file = to_csv(&choices, "");
         assert!(!file.contains("123456") && !file.contains("pwr"), "{file}");
         assert!(from_csv("pwrPwdFlag,Clave,1,").is_err());
+    }
+
+    #[test]
+    fn the_scan_range_is_read_and_written_in_mhz() {
+        let d = real();
+        assert_eq!(scan_range(&d), "400-470", "A real radio's bytes");
+        assert_eq!(apply_scan_range(&d, "400-470").unwrap(), d);
+        let out = apply_scan_range(&d, " 118 - 137 ").unwrap();
+        assert_eq!(out[44..48], [118, 0, 137, 0]);
+        assert_eq!(out[..44], d[..44]);
+        assert_eq!(out[48..], d[48..]);
+        for bad in ["", "400", "470-400", "400-400", "50-100", "400-1000", "a-b", "400.5-470"] {
+            assert!(apply_scan_range(&d, bad).is_err(), "{bad}");
+        }
+        // The menu checks whole MHz too.
+        let menu = String::from_utf8_lossy(include_bytes!("../../../src/App/AppMenu.c")).replace(char::is_whitespace, "");
+        assert!(menu.contains("g_radioInform.vfoScanRangeL=freqL;") && menu.contains("g_radioInform.vfoScanRangeH=freqH;"));
+    }
+
+    #[test]
+    fn the_settings_file_carries_the_scan_range() {
+        let d = real();
+        let choices: Vec<Option<usize>> = FIELDS.iter().map(|f| selected(&d, f)).collect();
+        let file = to_full_csv(&choices, "", "118-137");
+        assert_eq!(from_csv(&file).unwrap().0, choices);
+        assert_eq!(scan_from_csv(&file).as_deref(), Some("118-137"));
+        assert_eq!(scan_from_csv("sqlLevel,Silenciador,3,3"), None);
+        assert!(from_csv("vfoScan,Escaneo VFO,abc,").is_err());
     }
 
     #[test]

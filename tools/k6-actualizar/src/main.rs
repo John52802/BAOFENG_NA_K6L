@@ -49,6 +49,7 @@ macro_rules! say {
 mod channels;
 mod gui;
 mod logo;
+mod restore;
 mod settings;
 mod theme;
 mod vfo;
@@ -664,6 +665,9 @@ pub enum Action {
     WriteChannels { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadSettings,
     WriteSettings { loaded: Vec<u8>, wanted: Vec<u8> },
+    Restore(PathBuf),
+    ExportProfile(PathBuf),
+    ImportProfile(PathBuf),
     ReadVfo,
     WriteVfo { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadLogo,
@@ -749,6 +753,27 @@ Copia de los canales anteriores en:
                     path.display()
                 )
             })
+        }
+        Action::Restore(path) => {
+            let data = fs::read(&path).map_err(|e| format!("No se pudo leer la copia: {e}"))?;
+            let name = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+            let kind = restore::classify(&name, data.len())?;
+            say_waiting();
+            restore::restore(&mut link, kind, &data, &dir)
+        }
+        Action::ExportProfile(path) => {
+            say_waiting();
+            let data = restore::read_all(&mut link)?;
+            fs::write(&path, restore::to_profile(&data)).map_err(|e| format!("No se pudo guardar: {e}"))?;
+            Ok(format!("Perfil guardado en:\n{}", path.display()))
+        }
+        Action::ImportProfile(path) => {
+            let bytes = fs::read(&path).map_err(|e| format!("No se pudo leer el perfil: {e}"))?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            say_waiting();
+            let now = restore::read_all(&mut link)?;
+            let wanted = restore::plan_profile(&text, &now)?;
+            restore::write_changes(&mut link, &now, &wanted, &dir)
         }
         Action::ReadVfo => {
             say_waiting();

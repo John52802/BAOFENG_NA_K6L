@@ -46,7 +46,7 @@ Con el cable de programación conectado, enciende el radio con los 2 botones lat
 
 ## Programa para Windows
 
-`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces, edita canales con sus tonos CTCSS y DCS, potencia, ancho de banda y demás opciones, edita los VFO A y B, tiene modo oscuro, y cambia los ajustes del radio, la clave, el mensaje y el logo de encendido. Solo escribe en las zonas de voces, canales y logo de la memoria flash externa, los ajustes los guarda el propio firmware, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
+`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces, edita canales con sus tonos CTCSS y DCS, potencia, ancho de banda y demás opciones, edita los VFO A y B, restaura copias, guarda y aplica perfiles completos, tiene modo oscuro, y cambia los ajustes del radio, la clave, el mensaje y el logo de encendido. Solo escribe en las zonas de voces, canales y logo de la memoria flash externa, los ajustes los guarda el propio firmware, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
 
 Para compilarlo desde `tools/k6-actualizar`:
 

@@ -75,12 +75,12 @@ U8 CheckInputPassWord(void)
     return FERROR;
 }
 
-void App_CheckPowerOnPassword(void)
-{     
-    if(g_radioInform.pwrPwdFlag == 0 || g_radioInform.pwrPwdFlag == 0xFF)
-    {//未开启开机密码功能
-        return;
-    }
+#define PASSWORD_WAIT_TICKS 600 /* 30 seconds of 50 ms, when the prompt can be cancelled. */
+
+/* Asks for the password. With canCancel, EXIT on an empty entry or no key for a while gives up. */
+U8 PasswordPrompt(U8 canCancel)
+{
+    U16 idle = 0;
 
     ResetInputBuf();
     
@@ -93,6 +93,10 @@ void App_CheckPowerOnPassword(void)
             g_50msFlag = 0;
             KEY_GetKeyEvent();
             CheckPowerOff();
+            if(canCancel && ++idle >= PASSWORD_WAIT_TICKS)
+            {
+                return FERROR;
+            }
         }
         
         if(g_keyScan.keyEvent != KEYID_NONE)
@@ -119,12 +123,18 @@ void App_CheckPowerOnPassword(void)
                    else
                    {
                        BeepOut(BEEP_NULL);
+                       if(canCancel)
+                       {
+                           g_keyScan.keyEvent = KEYID_NONE;
+                           return FERROR;
+                       }
                    }
                    break;
                case KEYID_MENU: 
                    if(CheckInputPassWord() == OK)
-                   {//判断开机密码通过
-                       return;
+                   {
+                       g_keyScan.keyEvent = KEYID_NONE;
+                       return OK;
                    }
                    break;
                case KEYID_0:
@@ -156,7 +166,18 @@ void App_CheckPowerOnPassword(void)
             }
             /* Each press is handled once. */
             g_keyScan.keyEvent = KEYID_NONE;
+            idle = 0;
         }
     }
+}
+
+void App_CheckPowerOnPassword(void)
+{
+    if(g_radioInform.pwrPwdFlag == 0 || g_radioInform.pwrPwdFlag == 0xFF)
+    {
+        return;
+    }
+
+    PasswordPrompt(0);
 }
 

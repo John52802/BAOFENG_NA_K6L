@@ -2,7 +2,7 @@
 //! thread and reports through `crate::Msg`; a timer in the window collects those messages.
 
 use crate::channels::{self, Channel};
-use crate::{logo, settings, theme, vfo};
+use crate::{logo, restore, settings, theme, vfo};
 use crate::{list_ports, run_action, set_sink, Action, Language, Msg};
 use native_windows_gui as nwg;
 use std::cell::{Cell, RefCell};
@@ -101,6 +101,14 @@ struct Ui {
     password_on: nwg::ComboBox<String>,
     password_label: nwg::Label,
     password_text: nwg::TextInput,
+    scan_label: nwg::Label,
+    scan_text: nwg::TextInput,
+    restore: nwg::Button,
+    profile_export: nwg::Button,
+    profile_import: nwg::Button,
+    restore_open: nwg::FileDialog,
+    profile_open: nwg::FileDialog,
+    profile_saveas: nwg::FileDialog,
     tooltip: nwg::Tooltip,
 
     tab_vfo: nwg::Tab,
@@ -218,6 +226,10 @@ impl Ui {
         self.message_text.set_enabled(idle && has_settings);
         self.password_on.set_enabled(idle && has_settings);
         self.password_text.set_enabled(idle && has_settings);
+        self.scan_text.set_enabled(idle && has_settings);
+        self.restore.set_enabled(has_port);
+        self.profile_export.set_enabled(has_port);
+        self.profile_import.set_enabled(has_port);
         let has_vfo = self.vfo_data.borrow().is_some();
         self.vfo_read.set_enabled(has_port);
         self.vfo_save.set_enabled(has_port && has_vfo);
@@ -323,6 +335,7 @@ impl Ui {
             self.message_text.set_text(&settings::message(&data));
             self.password_on.set_selection(Some(settings::password_on(&data) as usize));
             self.password_text.set_text(&settings::password(&data));
+            self.scan_text.set_text(&settings::scan_range(&data));
             *self.settings_data.borrow_mut() = Some(data);
         }
         if let Some(data) = vfo_read {
@@ -400,7 +413,8 @@ impl Ui {
         let ask = self.password_on.selection() == Some(1);
         let code = self.password_text.text();
         let wanted = settings::apply(&loaded, &choices, &self.message_text.text())
-            .and_then(|data| settings::apply_password(&data, ask, &code));
+            .and_then(|data| settings::apply_password(&data, ask, &code))
+            .and_then(|data| settings::apply_scan_range(&data, &self.scan_text.text()));
         let wanted = match wanted {
             Ok(w) => w,
             Err(e) => {
@@ -573,6 +587,77 @@ impl Ui {
         }
     }
 
+    fn on_restore(&self) {
+        if !self.restore_open.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.restore_open.get_selected_item() else { return };
+        let path = PathBuf::from(file);
+        let name = path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned());
+        let len = fs::metadata(&path).map_or(0, |m| m.len() as usize);
+        let kind = match restore::classify(&name, len) {
+            Ok(kind) => kind,
+            Err(e) => {
+                self.message(&e, nwg::MessageIcons::Warning);
+                return;
+            }
+        };
+        let what = match kind {
+            restore::Kind::Channels => "Reemplazará todos los canales del radio por los de la copia.",
+            restore::Kind::Settings => "Reemplazará los ajustes del radio por los de la copia, incluidos la clave de encendido y el mensaje.",
+            restore::Kind::Vfo => "Reemplazará los VFO A y B por los de la copia.",
+            restore::Kind::Logo => "Reemplazará el logo por el de la copia.",
+            restore::Kind::FullFlash => "De una copia completa solo se usan los canales y el logo: reemplazará los del radio. La calibración y los ajustes no se tocan.",
+        };
+        let ok = self.confirm(
+            "Restaurar copia",
+            &format!("{name}\n\n{what}\n\nAntes se guardará una copia de lo actual. No desconectes el cable ni apagues el radio."),
+        );
+        if ok {
+            self.forget_loaded();
+            self.start(Action::Restore(path));
+        }
+    }
+
+    /// After a change made from outside the tabs, what they show may no longer be true.
+    fn forget_loaded(&self) {
+        *self.area.borrow_mut() = None;
+        *self.settings_data.borrow_mut() = None;
+        *self.vfo_data.borrow_mut() = None;
+        *self.logo_loaded.borrow_mut() = None;
+        self.channels.borrow_mut().clear();
+        self.fill_list();
+    }
+
+    fn on_export_profile(&self) {
+        if !self.profile_saveas.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.profile_saveas.get_selected_item() else { return };
+        let mut path = PathBuf::from(file);
+        if path.extension().is_none() {
+            path.set_extension("txt");
+        }
+        self.start(Action::ExportProfile(path));
+    }
+
+    fn on_import_profile(&self) {
+        if !self.profile_open.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.profile_open.get_selected_item() else { return };
+        let ok = self.confirm(
+            "Aplicar perfil",
+            "Reemplazará los canales, los VFO y los ajustes del radio por los del perfil. La clave de encendido no cambia.\n\n\
+             Se comprueba todo el archivo antes de escribir, y se guarda antes una copia de lo actual.\n\
+             No desconectes el cable ni apagues el radio: puede reiniciarse varias veces.",
+        );
+        if ok {
+            self.forget_loaded();
+            self.start(Action::ImportProfile(PathBuf::from(file)));
+        }
+    }
+
     fn on_settings_guide(&self) {
         self.log.set_text("");
         self.log.appendln("Qué hace cada ajuste:");
@@ -581,6 +666,7 @@ impl Ui {
         }
         self.log.appendln(&format!("Mensaje inicio: {}", settings::MESSAGE_HELP));
         self.log.appendln(&format!("Pedir clave: {}", settings::PASSWORD_HELP));
+        self.log.appendln(&format!("Escaneo VFO: {}", settings::SCAN_HELP));
         self.status.set_text("La explicación de cada ajuste está en el cuadro de abajo.");
     }
 
@@ -676,12 +762,19 @@ impl Ui {
         // Only the key and number columns matter, so a spreadsheet's text encoding can't hurt.
         let result = fs::read(&file)
             .map_err(|e| format!("No se pudo leer el archivo: {e}"))
-            .and_then(|bytes| settings::from_csv(&String::from_utf8_lossy(&bytes)));
+            .and_then(|bytes| {
+                let text = String::from_utf8_lossy(&bytes);
+                settings::from_csv(&text).map(|parsed| (parsed, settings::scan_from_csv(&text)))
+            });
         match result {
-            Ok((choices, text)) => {
+            Ok(((choices, text), imported_scan)) => {
                 let mut n = 0;
                 if let Some(text) = text {
                     self.message_text.set_text(&text);
+                    n += 1;
+                }
+                if let Some(scan) = imported_scan {
+                    self.scan_text.set_text(&scan);
                     n += 1;
                 }
                 for (b, choice) in self.setting_boxes.iter().zip(choices) {
@@ -706,7 +799,8 @@ impl Ui {
             path.set_extension("csv");
         }
         let choices: Vec<Option<usize>> = self.setting_boxes.iter().map(|b| b.selection()).collect();
-        match fs::write(&path, settings::to_csv(&choices, &self.message_text.text())) {
+        let file = settings::to_full_csv(&choices, &self.message_text.text(), self.scan_text.text().trim());
+        match fs::write(&path, file) {
             Ok(()) => self.status.set_text(&format!("Exportado: {}", path.display())),
             Err(e) => self.message(&format!("No se pudo guardar: {e}"), nwg::MessageIcons::Error),
         }
@@ -810,6 +904,10 @@ impl Ui {
         self.password_label.set_position(x, y + 3);
         self.password_text.set_position(x + 106, y);
         self.password_text.set_size(box_w, 24);
+        let (x, y) = place(settings::FIELDS.len() as i32 + 3);
+        self.scan_label.set_position(x, y + 3);
+        self.scan_text.set_position(x + 106, y);
+        self.scan_text.set_size(box_w, 24);
         self.settings_read.set_position(8, buttons_y);
         self.settings_save.set_position(130, buttons_y);
         self.settings_import.set_position(262, buttons_y);
@@ -1091,6 +1189,9 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .size((680, 22))
         .background_color(Some([255, 255, 255])).parent(t)
         .build(&mut ui.text_label)?;
+    nwg::Button::builder().text("Restaurar copia...").position((12, 284)).size((170, 28)).parent(t).build(&mut ui.restore)?;
+    nwg::Button::builder().text("Guardar perfil...").position((192, 284)).size((170, 28)).parent(t).build(&mut ui.profile_export)?;
+    nwg::Button::builder().text("Aplicar perfil...").position((372, 284)).size((170, 28)).parent(t).build(&mut ui.profile_import)?;
 
     let t = &ui.tab_channels;
     nwg::ListView::builder()
@@ -1169,6 +1270,8 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     let (x, y) = (8 + 2 * 236, 6 + 10 * 25);
     nwg::Label::builder().text("Mensaje inicio").position((x, y + 3)).size((104, 20)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.message_label)?;
     nwg::TextInput::builder().limit(16).position((x + 106, y)).size((118, 24)).parent(t).build(&mut ui.message_text)?;
+    nwg::Label::builder().text("Escaneo VFO").position((x, y + 3)).size((104, 20)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.scan_label)?;
+    nwg::TextInput::builder().limit(7).position((x + 106, y)).size((118, 24)).parent(t).build(&mut ui.scan_text)?;
     nwg::Tooltip::builder().build(&mut ui.tooltip)?;
     ui.tooltip.set_delay_time(Some(200));
     for (f, b) in settings::FIELDS.iter().zip(&ui.setting_boxes) {
@@ -1184,6 +1287,7 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::TextInput::builder().limit(6).position((x + 106, y)).size((118, 24)).parent(t).build(&mut ui.password_text)?;
     ui.tooltip.register(&ui.password_on, settings::PASSWORD_HELP);
     ui.tooltip.register(&ui.password_text, settings::PASSWORD_HELP);
+    ui.tooltip.register(&ui.scan_text, settings::SCAN_HELP);
     nwg::Button::builder().text("Leer del radio").position((8, 282)).size((116, 28)).parent(t).build(&mut ui.settings_read)?;
     nwg::Button::builder().text("Guardar en radio").position((130, 282)).size((126, 28)).parent(t).build(&mut ui.settings_save)?;
     nwg::Button::builder().text("Importar CSV...").position((262, 282)).size((112, 28)).parent(t).build(&mut ui.settings_import)?;
@@ -1300,6 +1404,21 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .filters("CSV (*.csv)|Todos (*.*)")
         .build(&mut ui.vfo_open)?;
     nwg::FileDialog::builder()
+        .title("Elegir copia para restaurar")
+        .action(nwg::FileDialogAction::Open)
+        .filters("Copias (*.bin)|Todos (*.*)")
+        .build(&mut ui.restore_open)?;
+    nwg::FileDialog::builder()
+        .title("Aplicar perfil")
+        .action(nwg::FileDialogAction::Open)
+        .filters("Perfiles (*.txt)|Todos (*.*)")
+        .build(&mut ui.profile_open)?;
+    nwg::FileDialog::builder()
+        .title("Guardar perfil")
+        .action(nwg::FileDialogAction::Save)
+        .filters("Perfiles (*.txt)")
+        .build(&mut ui.profile_saveas)?;
+    nwg::FileDialog::builder()
         .title("Exportar VFO")
         .action(nwg::FileDialogAction::Save)
         .filters("CSV (*.csv)")
@@ -1392,6 +1511,12 @@ pub fn run() {
                     ui.on_export_settings();
                 } else if handle == ui.settings_help.handle {
                     ui.on_settings_guide();
+                } else if handle == ui.restore.handle {
+                    ui.on_restore();
+                } else if handle == ui.profile_export.handle {
+                    ui.on_export_profile();
+                } else if handle == ui.profile_import.handle {
+                    ui.on_import_profile();
                 } else if handle == ui.vfo_read.handle {
                     ui.start(Action::ReadVfo);
                 } else if handle == ui.vfo_save.handle {
