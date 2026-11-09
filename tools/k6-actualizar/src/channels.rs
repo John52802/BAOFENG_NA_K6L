@@ -151,7 +151,7 @@ pub fn parse_tone(text: &str) -> Res<u16> {
     tenths.filter(|&v| v >= CTCSS_MIN_STORED).ok_or_else(bad)
 }
 
-fn is_standard_tone(v: u16) -> bool {
+pub fn is_standard_tone(v: u16) -> bool {
     v <= DCS_LAST || CTCSS_TONES.contains(&v)
 }
 

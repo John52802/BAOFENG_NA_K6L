@@ -25,6 +25,7 @@ pub enum Msg {
     ChannelsRead(Vec<u8>),
     SettingsRead(Vec<u8>),
     LogoRead(Vec<u8>),
+    VfoRead(Vec<u8>),
     Finished(Result<String, String>),
 }
 
@@ -49,6 +50,7 @@ mod channels;
 mod gui;
 mod logo;
 mod settings;
+mod vfo;
 
 // Built-in files, present only when build.rs finds them in out/. Without them the program
 // still works: firmware is chosen from a file, and Spanish voices are not offered.
@@ -661,6 +663,8 @@ pub enum Action {
     WriteChannels { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadSettings,
     WriteSettings { loaded: Vec<u8>, wanted: Vec<u8> },
+    ReadVfo,
+    WriteVfo { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadLogo,
     WriteLogo { loaded: Vec<u8>, screen: Vec<u8> },
 }
@@ -744,6 +748,24 @@ Copia de los canales anteriores en:
                     path.display()
                 )
             })
+        }
+        Action::ReadVfo => {
+            say_waiting();
+            let data = vfo::read_from_radio(&mut link)?;
+            emit(Msg::VfoRead(data));
+            Ok("VFO leídos.".to_string())
+        }
+        Action::WriteVfo { loaded, wanted } => {
+            say_waiting();
+            let (check, path) = vfo::write_to_radio(&mut link, &loaded, &wanted, &dir)?;
+            emit(Msg::VfoRead(check));
+            Ok(format!(
+                "VFO guardados y comprobados tras reiniciar el radio.
+
+Copia de los VFO anteriores en:
+{}",
+                path.display()
+            ))
         }
         Action::ReadLogo => {
             say_waiting();

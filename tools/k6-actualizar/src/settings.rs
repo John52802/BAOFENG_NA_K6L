@@ -3,14 +3,16 @@
 //! Settings live in a rotating log with a checksum at 0x9000, so this module never touches
 //! that flash directly. In programming mode the addresses 0x9000 and 0x9040 stand for the
 //! settings in RAM and the power-on text, and writing 0x9040 makes the radio save both the way
-//! its own menu does: see ProgromWriteReadData in src/CPS/ProgromFlash.c. Every other address
-//! in that mode goes straight to flash, so nothing else may ever be sent from here.
+//! its own menu does: see ProgromWriteReadData in src/CPS/ProgromFlash.c. 0x8000 does the same for
+//! the VFO records. Every other address in that mode goes straight to flash, so nothing else may
+//! ever be sent from here.
 
 use crate::{emit, ensure_backup_dir, open_link, pause, read_exact, utc_stamp, Link, Msg, Res, MS_REPLY, MS_WAIT_BOOT};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const BLOCK_SIZE: usize = 64;
+pub(crate) const BLOCK_SIZE: usize = 64;
+pub(crate) const ADDR_VFO: u16 = 0x8000; // Saved by Flash_SaveVfoData.
 pub const SETTINGS_SIZE: usize = 2 * BLOCK_SIZE;
 const ADDR_SETTINGS: u16 = 0x9000; // STR_RADIOINFORM in src/Common/PublType.h.
 const ADDR_POWER_TEXT: u16 = 0x9040; // Writing this one is what saves everything.
@@ -92,6 +94,8 @@ pub const FIELDS: &[Field] = &[
     byte("Teclado bloq.", "", "keyLock", 27, ON_OFF),
     byte("Desactivar FM", "", "fmEnale", 25, ON_OFF),
     byte("Alarma local", "", "alarmLocal", 18, ON_OFF),
+    byte("VFO si ocupado", "", "txBusyLock", 15, &["Transmite", "No transmite"]),
+    byte("VFO PTT ID", "", "pttIdMode", 11, &["No", "Al empezar", "Al terminar", "Ambos"]),
     byte("Aviso fin de TX", "", "toa", 40, &["No", "1 s", "2 s", "3 s", "4 s", "5 s", "6 s", "7 s", "8 s", "9 s", "10 s"]),
 ];
 
@@ -133,6 +137,8 @@ pub fn help(f: &Field) -> &'static str {
         "fmEnale" => "Con Sí, la radio FM no se puede abrir.",
         "alarmLocal" => "Con Sí, tu radio también suena cuando la alarma transmite. Con No, transmite sin sonar en tu radio.",
         "toa" => "Avisa este tiempo antes de que el Límite de TX corte la transmisión. Con No, corta sin avisar.",
+        "txBusyLock" => "En modo VFO, si el radio puede transmitir mientras recibe una señal. Los canales tienen su propia opción.",
+        "pttIdMode" => "En modo VFO, cuándo envía tu identificador DTMF. Los canales tienen su propia opción.",
         "userSideKey[0]" => "Función del botón lateral PF1 al pulsarlo corto.",
         "userSideKey[1]" => "Función del botón lateral PF1 al mantenerlo pulsado.",
         "userSideKey[2]" => "Función del botón lateral PF2 al pulsarlo corto.",
@@ -306,7 +312,7 @@ pub fn from_csv(text: &str) -> Res<(Vec<Option<usize>>, Option<String>)> {
     Ok((out, text_found))
 }
 
-fn enter(link: &mut dyn Link) -> Res<()> {
+pub(crate) fn enter(link: &mut dyn Link) -> Res<()> {
     open_link(link, MS_WAIT_BOOT)?;
     pause(MS_BETWEEN);
     link.clear_input();
@@ -317,12 +323,12 @@ fn enter(link: &mut dyn Link) -> Res<()> {
 }
 
 /// Ends the session, which restarts the radio.
-fn leave(link: &mut dyn Link) {
+pub(crate) fn leave(link: &mut dyn Link) {
     let _ = link.send(b"E");
     let _ = read_exact(link, 1, MS_REPLY);
 }
 
-fn read_block(link: &mut dyn Link, addr: u16) -> Res<Vec<u8>> {
+pub(crate) fn read_block(link: &mut dyn Link, addr: u16) -> Res<Vec<u8>> {
     let [hi, lo] = addr.to_be_bytes();
     link.send(&[b'R', hi, lo, BLOCK_SIZE as u8])?;
     let reply = read_exact(link, 4 + BLOCK_SIZE, MS_REPLY)?;
@@ -333,9 +339,9 @@ fn read_block(link: &mut dyn Link, addr: u16) -> Res<Vec<u8>> {
     Ok(reply[4..].to_vec())
 }
 
-fn write_block(link: &mut dyn Link, addr: u16, data: &[u8]) -> Res<()> {
+pub(crate) fn write_block(link: &mut dyn Link, addr: u16, data: &[u8]) -> Res<()> {
     // Other addresses are raw flash in this mode, and a sector start would even be erased.
-    if (addr != ADDR_SETTINGS && addr != ADDR_POWER_TEXT) || data.len() != BLOCK_SIZE {
+    if ![ADDR_SETTINGS, ADDR_POWER_TEXT, ADDR_VFO].contains(&addr) || data.len() != BLOCK_SIZE {
         return Err(format!("Escritura rechazada en 0x{addr:04X}: no es una zona de ajustes"));
     }
     let [hi, lo] = addr.to_be_bytes();
@@ -832,10 +838,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_settings_addresses_can_be_written() {
+    fn only_the_saving_addresses_can_be_written() {
         let mut radio = FakeRadio::new();
         radio.in_session = true;
-        for addr in [0x0000, 0x8000, 0x8FFF, 0x9001, 0x9080, 0xA000, 0xF000] {
+        for addr in [0x0000, 0x7FFF, 0x8001, 0x8040, 0x8FFF, 0x9001, 0x9080, 0xA000, 0xF000] {
             assert!(write_block(&mut radio, addr, &[0; BLOCK_SIZE]).is_err(), "{addr:04X}");
         }
         assert!(radio.writes.is_empty());

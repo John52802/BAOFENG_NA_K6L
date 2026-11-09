@@ -2,7 +2,7 @@
 //! thread and reports through `crate::Msg`; a timer in the window collects those messages.
 
 use crate::channels::{self, Channel};
-use crate::{logo, settings};
+use crate::{logo, settings, vfo};
 use crate::{list_ports, run_action, set_sink, Action, Language, Msg};
 use native_windows_gui as nwg;
 use std::cell::{Cell, RefCell};
@@ -102,6 +102,23 @@ struct Ui {
     password_text: nwg::TextInput,
     tooltip: nwg::Tooltip,
 
+    tab_vfo: nwg::Tab,
+    vfo_labels: Vec<nwg::Label>,
+    vfo_heads: [nwg::Label; 2],
+    vfo_freq: [nwg::TextInput; 2],
+    vfo_rx_tone: [nwg::TextInput; 2],
+    vfo_tx_tone: [nwg::TextInput; 2],
+    vfo_direction: [nwg::ComboBox<String>; 2],
+    vfo_offset: [nwg::TextInput; 2],
+    vfo_power: [nwg::ComboBox<String>; 2],
+    vfo_width: [nwg::ComboBox<String>; 2],
+    vfo_step: [nwg::ComboBox<String>; 2],
+    vfo_mute: [nwg::ComboBox<String>; 2],
+    vfo_read: nwg::Button,
+    vfo_save: nwg::Button,
+    vfo_hint: nwg::Label,
+    vfo_data: RefCell<Option<Vec<u8>>>,
+
     tab_logo: nwg::Tab,
     logo_frame: nwg::ImageFrame,
     logo_bitmap: RefCell<nwg::Bitmap>,
@@ -192,6 +209,20 @@ impl Ui {
         self.message_text.set_enabled(idle && has_settings);
         self.password_on.set_enabled(idle && has_settings);
         self.password_text.set_enabled(idle && has_settings);
+        let has_vfo = self.vfo_data.borrow().is_some();
+        self.vfo_read.set_enabled(has_port);
+        self.vfo_save.set_enabled(has_port && has_vfo);
+        for i in 0..vfo::VFO_COUNT {
+            self.vfo_freq[i].set_enabled(idle && has_vfo);
+            self.vfo_rx_tone[i].set_enabled(idle && has_vfo);
+            self.vfo_tx_tone[i].set_enabled(idle && has_vfo);
+            self.vfo_direction[i].set_enabled(idle && has_vfo);
+            self.vfo_offset[i].set_enabled(idle && has_vfo);
+            self.vfo_power[i].set_enabled(idle && has_vfo);
+            self.vfo_width[i].set_enabled(idle && has_vfo);
+            self.vfo_step[i].set_enabled(idle && has_vfo);
+            self.vfo_mute[i].set_enabled(idle && has_vfo);
+        }
         let has_logo = self.logo_loaded.borrow().is_some();
         let has_picture = self.logo_gray.borrow().is_some();
         self.logo_read.set_enabled(has_port);
@@ -247,6 +278,7 @@ impl Ui {
         let mut read = None;
         let mut settings_read = None;
         let mut logo_read = None;
+        let mut vfo_read = None;
         if let Some(rx) = self.rx_msgs.borrow().as_ref() {
             for m in rx.try_iter() {
                 match m {
@@ -258,6 +290,7 @@ impl Ui {
                     Msg::ChannelsRead(area) => read = Some(area),
                     Msg::SettingsRead(data) => settings_read = Some(data),
                     Msg::LogoRead(data) => logo_read = Some(data),
+                    Msg::VfoRead(data) => vfo_read = Some(data),
                     Msg::Finished(r) => finished = Some(r),
                 }
             }
@@ -275,6 +308,10 @@ impl Ui {
             self.password_on.set_selection(Some(settings::password_on(&data) as usize));
             self.password_text.set_text(&settings::password(&data));
             *self.settings_data.borrow_mut() = Some(data);
+        }
+        if let Some(data) = vfo_read {
+            self.show_vfos(&data);
+            *self.vfo_data.borrow_mut() = Some(data);
         }
         if let Some(data) = logo_read {
             let screen = data[..logo::SCREEN_SIZE].to_vec();
@@ -381,6 +418,74 @@ impl Ui {
         if ok {
             *self.settings_data.borrow_mut() = None; // The check after saving fills it again.
             self.start(Action::WriteSettings { loaded, wanted });
+        }
+    }
+
+    fn show_vfos(&self, data: &[u8]) {
+        let in_list = |v: u8, n: usize| ((v as usize) < n).then_some(v as usize);
+        for (i, v) in vfo::parse(data).iter().enumerate() {
+            self.vfo_freq[i].set_text(&vfo::format_freq(v.freq));
+            self.vfo_rx_tone[i].set_text(&channels::format_tone(v.rx_tone));
+            self.vfo_tx_tone[i].set_text(&channels::format_tone(v.tx_tone));
+            self.vfo_direction[i].set_selection(in_list(v.direction, vfo::DIRECTIONS.len()));
+            self.vfo_offset[i].set_text(&vfo::format_offset(v.offset));
+            self.vfo_power[i].set_selection(in_list(v.power, vfo::POWERS.len()));
+            self.vfo_width[i].set_selection(in_list(v.narrow, vfo::WIDTHS.len()));
+            self.vfo_step[i].set_selection(in_list(v.step, vfo::STEPS.len()));
+            self.vfo_mute[i].set_selection(in_list(v.mute, vfo::MUTES.len()));
+        }
+    }
+
+    fn edited_vfos(&self, loaded: &[u8]) -> Result<Vec<vfo::Vfo>, String> {
+        let mut list = vfo::parse(loaded);
+        for (i, v) in list.iter_mut().enumerate() {
+            let line = ["A", "B"][i];
+            let with_line = |e: String| format!("VFO {line}: {e}");
+            let freq_text = self.vfo_freq[i].text();
+            // An unchanged frequency stays as read, even if the radio holds an unusual one.
+            if freq_text.trim() != vfo::format_freq(v.freq) {
+                v.freq = channels::parse_mhz(&freq_text).map_err(with_line)?;
+            }
+            v.rx_tone = channels::parse_tone(&self.vfo_rx_tone[i].text()).map_err(with_line)?;
+            v.tx_tone = channels::parse_tone(&self.vfo_tx_tone[i].text()).map_err(with_line)?;
+            let offset_text = self.vfo_offset[i].text();
+            if offset_text.trim() != vfo::format_offset(v.offset) {
+                v.offset = vfo::parse_offset(&offset_text).map_err(with_line)?;
+            }
+            // A list left unselected keeps what the record has.
+            let pick = |b: &nwg::ComboBox<String>, old: u8| b.selection().map_or(old, |x| x as u8);
+            v.direction = pick(&self.vfo_direction[i], v.direction);
+            v.power = pick(&self.vfo_power[i], v.power);
+            v.narrow = pick(&self.vfo_width[i], v.narrow);
+            v.step = pick(&self.vfo_step[i], v.step);
+            v.mute = pick(&self.vfo_mute[i], v.mute);
+        }
+        Ok(list)
+    }
+
+    fn on_save_vfos(&self) {
+        let Some(loaded) = self.vfo_data.borrow().clone() else { return };
+        let wanted = self.edited_vfos(&loaded).and_then(|list| vfo::apply(&loaded, &list));
+        let wanted = match wanted {
+            Ok(w) => w,
+            Err(e) => {
+                self.message(&e, nwg::MessageIcons::Warning);
+                return;
+            }
+        };
+        if wanted == loaded {
+            self.message("No hay cambios que guardar.", nwg::MessageIcons::Info);
+            return;
+        }
+        let ok = self.confirm(
+            "Guardar VFO",
+            "Se guardará antes una copia de los VFO actuales. El radio se reiniciará\n\
+             dos veces para comprobar que los conservó.\n\n\
+             No desconectes el cable ni apagues el radio durante el proceso.",
+        );
+        if ok {
+            *self.vfo_data.borrow_mut() = None; // The check after saving fills it again.
+            self.start(Action::WriteVfo { loaded, wanted });
         }
     }
 
@@ -852,6 +957,7 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::Tab::builder().text("Radio").parent(&ui.tabs).build(&mut ui.tab_radio)?;
     nwg::Tab::builder().text("Canales").parent(&ui.tabs).build(&mut ui.tab_channels)?;
     nwg::Tab::builder().text("Ajustes").parent(&ui.tabs).build(&mut ui.tab_settings)?;
+    nwg::Tab::builder().text("VFO").parent(&ui.tabs).build(&mut ui.tab_vfo)?;
     nwg::Tab::builder().text("Logo").parent(&ui.tabs).build(&mut ui.tab_logo)?;
 
     let t = &ui.tab_radio;
@@ -983,6 +1089,42 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::Button::builder().text("Importar CSV...").position((262, 282)).size((112, 28)).parent(t).build(&mut ui.settings_import)?;
     nwg::Button::builder().text("Exportar CSV...").position((380, 282)).size((112, 28)).parent(t).build(&mut ui.settings_export)?;
     nwg::Button::builder().text("¿Qué hace cada ajuste?").position((498, 282)).size((196, 28)).parent(t).build(&mut ui.settings_help)?;
+
+    let t = &ui.tab_vfo;
+    const ROW: i32 = 29;
+    let names = ["Frecuencia (MHz)", "Tono RX", "Tono TX", "Dirección", "Desplaz. (MHz)", "Potencia", "Ancho", "Paso", "Silencio"];
+    ui.vfo_labels = names.iter().map(|_| Default::default()).collect();
+    for (i, name) in names.iter().enumerate() {
+        nwg::Label::builder().text(name).position((12, 32 + i as i32 * ROW)).size((130, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.vfo_labels[i])?;
+    }
+    let lists: [Vec<String>; 5] = [vfo::DIRECTIONS, vfo::POWERS, vfo::WIDTHS, vfo::STEPS, vfo::MUTES].map(|l| l.iter().map(|x| x.to_string()).collect());
+    for i in 0..vfo::VFO_COUNT {
+        let x = 150 + i as i32 * 170;
+        let at = |row: i32| (x, 30 + row * ROW);
+        nwg::Label::builder().text(["Línea A", "Línea B"][i]).position((x + 4, 6)).size((150, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.vfo_heads[i])?;
+        nwg::TextInput::builder().limit(9).position(at(0)).size((160, 26)).parent(t).build(&mut ui.vfo_freq[i])?;
+        nwg::TextInput::builder().limit(6).position(at(1)).size((160, 26)).parent(t).build(&mut ui.vfo_rx_tone[i])?;
+        nwg::TextInput::builder().limit(6).position(at(2)).size((160, 26)).parent(t).build(&mut ui.vfo_tx_tone[i])?;
+        nwg::ComboBox::builder().collection(lists[0].clone()).position(at(3)).size((160, 26)).parent(t).build(&mut ui.vfo_direction[i])?;
+        nwg::TextInput::builder().limit(9).position(at(4)).size((160, 26)).parent(t).build(&mut ui.vfo_offset[i])?;
+        nwg::ComboBox::builder().collection(lists[1].clone()).position(at(5)).size((160, 26)).parent(t).build(&mut ui.vfo_power[i])?;
+        nwg::ComboBox::builder().collection(lists[2].clone()).position(at(6)).size((160, 26)).parent(t).build(&mut ui.vfo_width[i])?;
+        nwg::ComboBox::builder().collection(lists[3].clone()).position(at(7)).size((160, 26)).parent(t).build(&mut ui.vfo_step[i])?;
+        nwg::ComboBox::builder().collection(lists[4].clone()).position(at(8)).size((160, 26)).parent(t).build(&mut ui.vfo_mute[i])?;
+    }
+    nwg::Button::builder().text("Leer del radio").position((510, 30)).size((180, 32)).parent(t).build(&mut ui.vfo_read)?;
+    nwg::Button::builder().text("Guardar en radio").position((510, 70)).size((180, 32)).parent(t).build(&mut ui.vfo_save)?;
+    nwg::Label::builder()
+        .text("Cada línea guarda su frecuencia y opciones. Se usan con esa línea en modo frecuencia (V/M).
+
+Tonos: 88.5 (CTCSS), D023N o D023I (DCS). Vacío: sin tono.
+
+Dirección y desplazamiento: para transmitir en otra frecuencia, como con un repetidor. Por ejemplo, - y 0.6.")
+        .position((510, 112))
+        .size((460, 180))
+        .background_color(Some([255, 255, 255]))
+        .parent(t)
+        .build(&mut ui.vfo_hint)?;
 
     let t = &ui.tab_logo;
     nwg::ImageFrame::builder().position((12, 12)).size((256, 128)).parent(t).build(&mut ui.logo_frame)?;
@@ -1133,6 +1275,10 @@ pub fn run() {
                     ui.on_export_settings();
                 } else if handle == ui.settings_help.handle {
                     ui.on_settings_guide();
+                } else if handle == ui.vfo_read.handle {
+                    ui.start(Action::ReadVfo);
+                } else if handle == ui.vfo_save.handle {
+                    ui.on_save_vfos();
                 } else if handle == ui.logo_read.handle {
                     ui.start(Action::ReadLogo);
                 } else if handle == ui.logo_choose.handle {
