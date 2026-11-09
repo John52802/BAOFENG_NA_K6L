@@ -39,6 +39,11 @@ const SAME_ROUGH: u32 = 30_000; // 300 kHz: what a sweep in one direction can be
 const SEND_EVERY: Duration = Duration::from_millis(500);
 const MS_ENTER: u64 = if cfg!(test) { 5 } else { 4000 };
 const MS_SWEEP_EXTRA: u64 = if cfg!(test) { 5 } else { 5000 };
+const MS_VERSION: u64 = if cfg!(test) { 5 } else { 500 };
+const TONE_WAIT_MS: u16 = 1500;
+const TONES_PER_ROUND: usize = 3;
+/// The firmware's PC_VERSION from which it detects tones.
+const VERSION_TONES: u8 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
@@ -73,12 +78,40 @@ pub struct Hit {
     pub last: String,
     /// Found by the closer look, not only estimated from the sweeps.
     pub exact: bool,
+    pub tone: Tone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tone {
+    Unchecked,
+    None,
+    /// As a channel stores it: CTCSS in tenths of a Hz, or the DCS number from 1 to 105.
+    Code(u16),
+    /// A code outside the standard lists.
+    Other,
+}
+
+pub fn tone_text(t: Tone) -> String {
+    match t {
+        Tone::Unchecked => String::new(),
+        Tone::None => "Sin tono".into(),
+        Tone::Code(v) => channels::format_tone(v),
+        Tone::Other => "No estándar".into(),
+    }
 }
 
 pub fn to_csv(hits: &[Hit]) -> String {
-    let mut s = String::from("frecuencia_mhz,nivel,veces,ultima_vez,exactitud\r\n");
+    let mut s = String::from("frecuencia_mhz,tono,nivel,veces,ultima_vez,exactitud\r\n");
     for h in hits {
-        s.push_str(&format!("{},{},{},{},{}\r\n", channels::format_mhz(h.freq), h.level, h.times, h.last, accuracy(h)));
+        s.push_str(&format!(
+            "{},{},{},{},{},{}\r\n",
+            channels::format_mhz(h.freq),
+            tone_text(h.tone),
+            h.level,
+            h.times,
+            h.last,
+            accuracy(h)
+        ));
     }
     s
 }
@@ -246,8 +279,43 @@ fn near(a: u32, b: u32, distance: u32) -> bool {
     a.abs_diff(b) <= distance
 }
 
+fn tone_frame(freq: u32, wait: u16) -> Vec<u8> {
+    let mut f = vec![b'T'];
+    f.extend_from_slice(&freq.to_le_bytes());
+    f.extend_from_slice(&wait.to_le_bytes());
+    f.push(f.iter().fold(0, |a, b| a ^ b));
+    f
+}
+
+fn tone_check(link: &mut dyn Link, freq: u32) -> Res<Tone> {
+    link.send(&tone_frame(freq, TONE_WAIT_MS))?;
+    let reply = read_exact(link, 1, TONE_WAIT_MS as u64 + MS_REPLY)?;
+    match reply[0] {
+        b'T' => {}
+        b'N' => return Err("El radio rechazó la búsqueda de tono.".into()),
+        other => return Err(format!("Respuesta inesperada del radio: {other:#04X}")),
+    }
+    let r = read_exact(link, 3, MS_REPLY)?;
+    let value = u16::from_le_bytes([r[1], r[2]]);
+    Ok(match r[0] {
+        1 | 2 => Tone::Code(value),
+        3 => Tone::Other,
+        _ => Tone::None,
+    })
+}
+
+/// Keeps what is known: a tone found is kept over a later reading without one.
+fn merge_tone(old: Tone, new: Tone) -> Tone {
+    match (old, new) {
+        (_, Tone::Code(_)) | (Tone::Unchecked, _) => new,
+        (Tone::None, Tone::Other) => new,
+        _ => old,
+    }
+}
+
 /// Counts it on the entry for that frequency, or adds one. An exact result replaces an estimate.
-fn record(hits: &mut Vec<Hit>, freq: u32, level: u8, exact: bool, now: &str) {
+/// Returns where the entry is.
+fn record(hits: &mut Vec<Hit>, freq: u32, level: u8, exact: bool, now: &str) -> u32 {
     let found = hits.iter().position(|h| near(h.freq, freq, if h.exact && exact { SAME_EXACT } else { SAME_ROUGH }));
     match found {
         Some(i) => {
@@ -260,9 +328,17 @@ fn record(hits: &mut Vec<Hit>, freq: u32, level: u8, exact: bool, now: &str) {
                 h.exact = true;
             }
         }
-        None => hits.push(Hit { freq, level, times: 1, last: now.to_string(), exact }),
+        None => hits.push(Hit { freq, level, times: 1, last: now.to_string(), exact, tone: Tone::Unchecked }),
     }
+    let at = found.map_or(freq, |i| hits[i].freq);
     hits.sort_by_key(|h| h.freq);
+    at
+}
+
+fn set_tone(hits: &mut [Hit], at: u32, tone: Tone) {
+    if let Some(h) = hits.iter_mut().find(|h| h.freq == at) {
+        h.tone = merge_tone(h.tone, tone);
+    }
 }
 
 /// Whether a closer look would only find again what the list already has.
@@ -305,7 +381,7 @@ fn close_look(link: &mut dyn Link, around: u32, margin: u8, stop: &AtomicBool) -
 }
 
 /// Rounds until asked to stop.
-fn rounds(link: &mut dyn Link, plan: &Plan, stop: &AtomicBool, hits: &mut Vec<Hit>) -> Res<()> {
+fn rounds(link: &mut dyn Link, plan: &Plan, stop: &AtomicBool, hits: &mut Vec<Hit>, tones: bool) -> Res<()> {
     let mut round = 0u32;
     loop {
         round += 1;
@@ -316,10 +392,21 @@ fn rounds(link: &mut dyn Link, plan: &Plan, stop: &AtomicBool, hits: &mut Vec<Hi
         show(&down);
 
         let mut looked = 0;
+        let mut toned = 0;
         for c in candidates(&up, &down, plan.low, plan.step, plan.margin, plan.dwell) {
             let now = local_time();
             if already_exact(hits, &c, plan.step) {
-                record(hits, c.freq, c.level, false, &now);
+                let at = record(hits, c.freq, c.level, false, &now);
+                let unknown = hits.iter().any(|h| h.freq == at && matches!(h.tone, Tone::Unchecked | Tone::None));
+                if tones && unknown && toned < TONES_PER_ROUND {
+                    toned += 1;
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(());
+                    }
+                    let tone = tone_check(link, at)?;
+                    set_tone(hits, at, tone);
+                    emit(Msg::ScanHits(hits.clone()));
+                }
                 continue;
             }
             let mut exact = None;
@@ -331,7 +418,14 @@ fn rounds(link: &mut dyn Link, plan: &Plan, stop: &AtomicBool, hits: &mut Vec<Hi
                     None => return Ok(()),
                 }
             }
-            record(hits, exact.unwrap_or(c.freq), c.level, exact.is_some(), &now);
+            let at = record(hits, exact.unwrap_or(c.freq), c.level, exact.is_some(), &now);
+            // Only where the closer look found the signal still there, on its exact frequency.
+            if tones && exact.is_some() && !stop.load(Ordering::Relaxed) {
+                toned += 1;
+                say!("Vuelta {round}: buscando el tono de {} MHz...", channels::format_mhz(at));
+                let tone = tone_check(link, at)?;
+                set_tone(hits, at, tone);
+            }
             emit(Msg::ScanHits(hits.clone()));
         }
         emit(Msg::ScanHits(hits.clone()));
@@ -350,11 +444,16 @@ pub fn run(link: &mut dyn Link, plan: &Plan, stop: &AtomicBool) -> Res<String> {
     if !matches!(entered.as_deref(), Ok([ACK])) {
         return Err("El radio no entró en modo PC. Instala el firmware de este programa (L1.8a o posterior) y prueba de nuevo.".into());
     }
+    // L1.8a sends no version, and doesn't detect tones.
+    let tones = matches!(read_exact(link, 1, MS_VERSION).as_deref(), Ok([v]) if *v >= VERSION_TONES);
+    if !tones {
+        say!("El firmware del radio no detecta tonos: instala el de este programa para verlos.");
+    }
     say!("El radio está en modo PC. Con el cable conectado no se oye por su altavoz.");
     say!("Para escuchar una frecuencia, detén la búsqueda y desconecta el cable.");
 
     let mut hits = Vec::new();
-    let result = rounds(link, plan, stop, &mut hits);
+    let result = rounds(link, plan, stop, &mut hits, tones);
     let _ = link.send(b"E");
     pause(MS_PAUSE);
     result?;
@@ -437,6 +536,9 @@ mod tests {
         let src = String::from_utf8_lossy(include_bytes!("../../../src/App/AppSpectrum.c")).replace(char::is_whitespace, "");
         assert!(src.contains(&format!("#definePC_MAX_POINTS{MAX_POINTS}")));
         assert!(src.contains("#definePC_FRAME_LEN15"));
+        assert!(src.contains("#definePC_TONE_LEN8"));
+        assert!(src.contains(&format!("#definePC_VERSION{VERSION_TONES}")));
+        assert_eq!(tone_frame(14_652_000, TONE_WAIT_MS).len(), 8);
         let radio = String::from_utf8_lossy(include_bytes!("../../../src/Core/Radio.h")).replace(char::is_whitespace, "");
         assert!(radio.contains(&format!("#defineRX_MIN_100KHZ{}UL", RX_MIN / 10000)));
         assert!(radio.contains(&format!("#defineRX_MAX_100KHZ{}UL", RX_MAX / 10000)));
@@ -516,14 +618,20 @@ mod tests {
         let mut hits = Vec::new();
         record(&mut hits, 14_660_000, 90, false, "a");
         record(&mut hits, 14_652_000, 80, true, "b");
-        assert_eq!(hits, [Hit { freq: 14_652_000, level: 90, times: 2, last: "b".into(), exact: true }]);
+        assert_eq!(hits, [Hit { freq: 14_652_000, level: 90, times: 2, last: "b".into(), exact: true, tone: Tone::Unchecked }]);
         record(&mut hits, 14_652_500, 70, true, "c");
         assert_eq!(hits.len(), 1);
         record(&mut hits, 14_600_000, 70, true, "d");
         assert_eq!(hits.iter().map(|h| h.freq).collect::<Vec<_>>(), [14_600_000, 14_652_000]);
         assert!(already_exact(&hits, &Candidate { freq: 14_652_500, level: 1, both: true }, 1250));
         assert!(!already_exact(&hits, &Candidate { freq: 14_500_000, level: 1, both: true }, 1250));
-        assert!(to_csv(&hits).contains("146.52,90,3,c,Afinada\r\n"));
+        set_tone(&mut hits, 14_652_000, Tone::Code(885));
+        set_tone(&mut hits, 14_652_000, Tone::None);
+        assert_eq!(hits[1].tone, Tone::Code(885));
+        assert!(to_csv(&hits).contains("146.52,88.5,90,3,c,Afinada\r\n"));
+        assert_eq!(merge_tone(Tone::Unchecked, Tone::None), Tone::None);
+        assert_eq!(merge_tone(Tone::None, Tone::Other), Tone::Other);
+        assert_eq!(merge_tone(Tone::Other, Tone::None), Tone::Other);
     }
 
     struct FakeRadio {
@@ -531,6 +639,7 @@ mod tests {
         rx: VecDeque<u8>,
         answer: u8,
         supported: bool,
+        version: Option<u8>,
     }
 
     impl Link for FakeRadio {
@@ -538,7 +647,11 @@ mod tests {
             self.sent.push(data.to_vec());
             match data[0] {
                 b'P' => self.rx.push_back(ACK),
-                b'S' if data.len() == 1 && self.supported => self.rx.push_back(ACK),
+                b'S' if data.len() == 1 && self.supported => {
+                    self.rx.push_back(ACK);
+                    self.rx.extend(self.version);
+                }
+                b'T' if data.len() == 8 => self.rx.extend([b'T', 2, 23, 0]),
                 b'S' if data.len() == 15 => {
                     self.rx.push_back(self.answer);
                     if self.answer == b'S' {
@@ -564,7 +677,25 @@ mod tests {
     }
 
     fn radio(answer: u8, supported: bool) -> FakeRadio {
-        FakeRadio { sent: Vec::new(), rx: VecDeque::new(), answer, supported }
+        FakeRadio { sent: Vec::new(), rx: VecDeque::new(), answer, supported, version: Some(VERSION_TONES) }
+    }
+
+    #[test]
+    fn a_tone_comes_back_as_a_channel_stores_it() {
+        let mut r = radio(b'S', true);
+        assert_eq!(tone_check(&mut r, 14_652_000).unwrap(), Tone::Code(23));
+        let f = &r.sent[0];
+        assert_eq!(f[..7], [b'T', 0x60, 0x92, 0xDF, 0x00, 0xDC, 0x05]);
+        assert_eq!(f[..7].iter().fold(0, |a, b| a ^ b), f[7]);
+        assert_eq!(tone_text(Tone::Code(23)), channels::format_tone(23));
+    }
+
+    #[test]
+    fn firmware_without_tones_still_searches() {
+        let plan = make_plan("144", "145", 10000, 10, 25).unwrap();
+        let mut r = radio(b'S', true);
+        r.version = None;
+        assert!(run(&mut r, &plan, &AtomicBool::new(true)).is_ok());
     }
 
     #[test]

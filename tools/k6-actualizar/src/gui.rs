@@ -164,6 +164,9 @@ struct Ui {
     scan_bitmap: RefCell<nwg::Bitmap>,
     scan_axis: nwg::Label,
     scan_list: nwg::ListView,
+    scan_to_channel: nwg::Button,
+    scan_to_a: nwg::Button,
+    scan_to_b: nwg::Button,
     scan_saveas: nwg::FileDialog,
     scan_hits: RefCell<Vec<scan::Hit>>,
     scan_levels: RefCell<(Vec<u8>, u8)>,
@@ -272,6 +275,10 @@ impl Ui {
         self.scan_stop.set_enabled(scanning);
         self.scan_export.set_enabled(idle && !self.scan_hits.borrow().is_empty());
         self.scan_clear.set_enabled(idle);
+        let has_hits = !self.scan_hits.borrow().is_empty();
+        self.scan_to_channel.set_enabled(idle && has_hits);
+        self.scan_to_a.set_enabled(idle && has_hits);
+        self.scan_to_b.set_enabled(idle && has_hits);
         let has_fm = self.fm_data.borrow().is_some();
         self.fm_text.set_enabled(idle && has_fm);
         self.fm_read.set_enabled(has_port);
@@ -684,12 +691,67 @@ impl Ui {
         for h in self.scan_hits.borrow().iter() {
             let row = [
                 channels::format_mhz(h.freq),
+                scan::tone_text(h.tone),
                 h.level.to_string(),
                 h.times.to_string(),
                 h.last.clone(),
                 scan::accuracy(h).to_string(),
             ];
             self.scan_list.insert_items_row(None, &row);
+        }
+    }
+
+    /// Copies the chosen frequency and its tone into the channel editor (None) or a VFO line, for
+    /// the user to look over and save from there.
+    fn on_scan_use(&self, vfo_line: Option<usize>) {
+        let Some(row) = self.scan_list.selected_item() else {
+            self.message("Elige una frecuencia de la lista.", nwg::MessageIcons::Warning);
+            return;
+        };
+        let Some(hit) = self.scan_hits.borrow().get(row).cloned() else { return };
+        let tone = match hit.tone {
+            scan::Tone::Code(v) => channels::format_tone(v),
+            _ => String::new(),
+        };
+        let freq = channels::format_mhz(hit.freq);
+        match vfo_line {
+            None => {
+                if self.area.borrow().is_none() {
+                    self.message("Primero lee los canales en la pestaña Canales.", nwg::MessageIcons::Warning);
+                    return;
+                }
+                let used: Vec<usize> = self.channels.borrow().iter().map(|c| c.number).collect();
+                let Some(free) = (1..=channels::CHANNEL_COUNT).find(|n| !used.contains(n)) else {
+                    self.message("No quedan canales libres.", nwg::MessageIcons::Warning);
+                    return;
+                };
+                self.num.set_text(&free.to_string());
+                self.rx.set_text(&freq);
+                self.tx.set_text(&freq);
+                self.name.set_text("");
+                self.rx_tone.set_text(&tone);
+                self.tx_tone.set_text(&tone);
+                self.tabs.set_selected_tab(1);
+                self.status.set_text(&format!(
+                    "Canal {free} preparado con {freq} MHz. Revísalo, ponle nombre si quieres, pulsa Aplicar y luego Guardar en radio."
+                ));
+            }
+            Some(i) => {
+                if self.vfo_data.borrow().is_none() {
+                    self.message("Primero lee los VFO en la pestaña VFO.", nwg::MessageIcons::Warning);
+                    return;
+                }
+                self.vfo_freq[i].set_text(&freq);
+                self.vfo_rx_tone[i].set_text(&tone);
+                self.vfo_tx_tone[i].set_text(&tone);
+                // Without a shift, so it doesn't transmit somewhere else.
+                self.vfo_direction[i].set_selection(Some(0));
+                self.tabs.set_selected_tab(3);
+                self.status.set_text(&format!(
+                    "VFO {} preparado con {freq} MHz. Revísalo y pulsa Guardar en radio.",
+                    ["A", "B"][i]
+                ));
+            }
         }
     }
 
@@ -1132,7 +1194,11 @@ impl Ui {
         let graph_h = (th - 72) * 2 / 5;
         self.scan_frame.set_size((tw - 24) as u32, graph_h as u32);
         self.scan_axis.set_position(12, 44 + graph_h);
-        self.scan_axis.set_size((tw - 24) as u32, 20);
+        self.scan_axis.set_size((tw - 24 - 402) as u32, 20);
+        let bx = tw - 12 - 396;
+        self.scan_to_channel.set_position(bx, 40 + graph_h);
+        self.scan_to_a.set_position(bx + 134, 40 + graph_h);
+        self.scan_to_b.set_position(bx + 268, 40 + graph_h);
         self.scan_list.set_position(12, 66 + graph_h);
         self.scan_list.set_size((tw - 24) as u32, (th - 72 - graph_h) as u32);
         self.draw_scan();
@@ -1617,7 +1683,10 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .ex_flags(nwg::ListViewExFlags::FULL_ROW_SELECT | nwg::ListViewExFlags::GRID)
         .parent(t)
         .build(&mut ui.scan_list)?;
-    for (i, (text, width)) in [("Frecuencia (MHz)", 130), ("Nivel", 60), ("Veces", 60), ("Última vez", 170), ("Exactitud", 110)].iter().enumerate() {
+    nwg::Button::builder().text("Usar en canal").position((576, 134)).size((128, 24)).parent(t).build(&mut ui.scan_to_channel)?;
+    nwg::Button::builder().text("Usar en VFO A").position((710, 134)).size((128, 24)).parent(t).build(&mut ui.scan_to_a)?;
+    nwg::Button::builder().text("Usar en VFO B").position((844, 134)).size((128, 24)).parent(t).build(&mut ui.scan_to_b)?;
+    for (i, (text, width)) in [("Frecuencia (MHz)", 130), ("Tono", 90), ("Nivel", 60), ("Veces", 60), ("Última vez", 170), ("Exactitud", 110)].iter().enumerate() {
         ui.scan_list.insert_column(nwg::InsertListViewColumn {
             index: Some(i as i32),
             fmt: None,
@@ -1835,6 +1904,12 @@ pub fn run() {
                     ui.on_scan_export();
                 } else if handle == ui.scan_clear.handle {
                     ui.on_scan_clear();
+                } else if handle == ui.scan_to_channel.handle {
+                    ui.on_scan_use(None);
+                } else if handle == ui.scan_to_a.handle {
+                    ui.on_scan_use(Some(0));
+                } else if handle == ui.scan_to_b.handle {
+                    ui.on_scan_use(Some(1));
                 } else if handle == ui.fm_read.handle {
                     ui.start(Action::ReadFm);
                 } else if handle == ui.fm_save.handle {

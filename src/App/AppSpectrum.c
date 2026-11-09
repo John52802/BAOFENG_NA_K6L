@@ -519,6 +519,12 @@ extern void EnterSpectrumMode(void)
  *
  * 'S' start(U32) step(U32) count(U16) dwell(U16) down(U8) xor(U8), little endian, frequencies
  * in units of 10 Hz. Replies 'S' and the levels, or 'N' if the request isn't valid.
+ *
+ * 'T' freq(U32) wait(U16) xor(U8): listens for a CTCSS or DCS tone for up to `wait` ms.
+ * Replies 'T' type(U8) value(U16): the value as a channel stores it, CTCSS in tenths of a Hz
+ * or the DCS number from 1 to 105. Or 'N' if the request isn't valid.
+ *
+ * On entering it sends the ACK and PC_VERSION, so the program knows what it can ask.
  */
 #define PC_FRAME_LEN    15
 #define PC_MAX_POINTS   8000
@@ -527,6 +533,13 @@ extern void EnterSpectrumMode(void)
 #define PC_MAX_DWELL    2000
 #define PC_IDLE_TICKS   50    /* Of 100 ms: 5 s without a request. */
 #define PC_ACK          0x06
+#define PC_VERSION      2     /* 1 had no 'T' and sent no version. */
+#define PC_TONE_LEN     8
+#define PC_TONE_MAX_WAIT 3000
+#define PC_TONE_READ_MS 20
+#define PC_TONE_SAME    3     /* Readings in a row that must agree. */
+
+enum { PC_TONE_NONE = 0, PC_TONE_CTCSS, PC_TONE_DCS, PC_TONE_OTHER };
 
 static U16 pcNormalAgc;
 
@@ -604,6 +617,102 @@ static void PcSweep(void)
     }
 }
 
+/* One reading of the tone decoder, as the type and the value a channel stores. */
+static U8 PcReadTone(U16 *value)
+{
+    U32 raw = Rfic_GetCtsDcsData();
+    U8  type = Rfic_GetSCtsDcsType();
+    U16 tenths, diff;
+    U8  i;
+
+    *value = 0;
+    if(raw == 0 || type == SUBAUDIO_NONE)
+    {
+        return PC_TONE_NONE;
+    }
+    if(type == SUBAUDIO_CTS)
+    {
+        /* As in AppScanQT.c: the raw value is at most 0x1FFF, so this fits. */
+        tenths = (U16)(raw * 10 * 10000 / 206489);
+        if(tenths <= 600)
+        {
+            return PC_TONE_NONE;
+        }
+        for(i = 0; i < 51; i++)
+        {
+            diff = (tenths > CTCS_TAB[i]) ? tenths - CTCS_TAB[i] : CTCS_TAB[i] - tenths;
+            if(diff < 10)
+            {
+                *value = CTCS_TAB[i];
+                return PC_TONE_CTCSS;
+            }
+        }
+        *value = tenths;
+        return PC_TONE_OTHER;
+    }
+    if(CheckIsStandardDCS(raw) != 0)
+    {
+        *value = (U16)searchFreqImofs.CtsResult;
+        return PC_TONE_DCS;
+    }
+    return PC_TONE_OTHER;
+}
+
+static void PcTone(void)
+{
+    U32 freq;
+    U16 wait, elapsed, value, lastValue = 0, i;
+    U8  type, lastType = PC_TONE_NONE, same = 0, check = 0, valid;
+
+    for(i = 0; i < PC_TONE_LEN - 1; i++)
+    {
+        check ^= progrom.rxBuf[i];
+    }
+    memcpy(&freq, &progrom.rxBuf[1], 4);
+    memcpy(&wait, &progrom.rxBuf[5], 2);
+    valid = (check == progrom.rxBuf[PC_TONE_LEN - 1])
+         && wait >= PC_TONE_READ_MS && wait <= PC_TONE_MAX_WAIT
+         && freq >= SP_RX_MIN && freq < SP_RX_MAX;
+
+    progrom.dataNum = 0;
+    if(!valid)
+    {
+        uartSendChar('N');
+        return;
+    }
+
+    SpTune(freq);
+    /* The decoder as with no tone set, whatever the VFO has. */
+    CTCSS_WithRfic(551, 0);
+    Rfic_CtcDcsScan_Setup(freq);
+    for(elapsed = 0; elapsed < wait && same < PC_TONE_SAME; elapsed += PC_TONE_READ_MS)
+    {
+        PcService();
+        DelayMs(PC_TONE_READ_MS);
+        type = PcReadTone(&value);
+        if(type != PC_TONE_NONE && type == lastType && value == lastValue)
+        {
+            same++;
+        }
+        else
+        {
+            same = (type != PC_TONE_NONE) ? 1 : 0;
+        }
+        lastType = type;
+        lastValue = value;
+    }
+    Rfic_ScanQT_Disable();
+    if(same < PC_TONE_SAME)
+    {
+        lastType = PC_TONE_NONE;
+        lastValue = 0;
+    }
+    uartSendChar('T');
+    uartSendChar(lastType);
+    uartSendChar((U8)lastValue);
+    uartSendChar((U8)(lastValue >> 8));
+}
+
 extern void EnterPcScanMode(void)
 {
     U8 idle = 0, tick;
@@ -628,6 +737,7 @@ extern void EnterPcScanMode(void)
     DelayMs(SP_START_WAIT);
     progrom.dataNum = 0;
     uartSendChar(PC_ACK);
+    uartSendChar(PC_VERSION);
 
     while(1)
     {
@@ -641,14 +751,25 @@ extern void EnterPcScanMode(void)
         {
             continue;
         }
-        if(progrom.rxBuf[0] != 'S')
+        if(progrom.rxBuf[0] == 'S')
+        {
+            if(progrom.dataNum >= PC_FRAME_LEN)
+            {
+                PcSweep();
+                idle = 0;
+            }
+        }
+        else if(progrom.rxBuf[0] == 'T')
+        {
+            if(progrom.dataNum >= PC_TONE_LEN)
+            {
+                PcTone();
+                idle = 0;
+            }
+        }
+        else
         {
             progrom.dataNum = 0;
-        }
-        else if(progrom.dataNum >= PC_FRAME_LEN)
-        {
-            PcSweep();
-            idle = 0;
         }
     }
 }
