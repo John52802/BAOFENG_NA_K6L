@@ -293,39 +293,68 @@ extern void DisplayUpdateChFlag(U8 disAB)
 	}
 }
 
+/* What the free space of the single-line screen shows. In channel mode with only the name it's
+   the place of the frequency; in VFO mode, the line above the frequency. */
+enum { SPOT_NONE = 0, SPOT_LOWER, SPOT_TOP };
+
+#define BAR_LEFT    40
+#define BAR_WIDTH   72
+#define BAR_PAGE    5      /* Row of the LCD buffer: dots 40 to 47. */
+#define RSSI_LOW    35     /* The reading is about dBm + 160: this is -125 dBm... */
+#define RSSI_HIGH   115    /* ...and this -45 dBm. */
+
+extern U8 gLcdBuffer[8][128];
+
 static U8 shownPercent = 0xFF;
+static U16 txTicks;        /* Half seconds of the current transmission. */
+static U8 barWidth = 0xFF; /* 0xFF: the bar isn't on screen. */
+static U8 txOnScreen;      /* The TX time is showing: it must go once the transmission ends. */
 
-/* In the place of the frequency, when a channel shows only its name. */
-static void DrawBatteryPercent(void)
+/* The cleared area reaches the power and bandwidth flags, so they are drawn again, as
+   DisplayChannelMsg does. */
+static void ClearStatusLower(void)
 {
-    String text[8];
-
-    /* A redraw keeps the number on screen: only DisplayBatteryPercentUpdate changes it. */
-    if(shownPercent == 0xFF)
-    {
-        shownPercent = BatteryGetPercent();
-    }
-    sprintf(text, "%3u%%", shownPercent);
-    LCD_DisplayText(39, 56, (U8 *)text, FONTSIZE_16x16, LCD_DIS_NORMAL);
+    LCD_ClearArea(35, 30, 98, 21);
+    DisplayUpdateChFlag(g_ChannelVfoInfo.switchAB);
 }
 
-/* Keeps that number current. Does nothing while anything else is using that place. */
-extern void DisplayBatteryPercentUpdate(void)
+static U8 StatusSpot(void)
 {
     String nameBuf[16] = {0};
     U8 line = g_ChannelVfoInfo.switchAB;
     U8 mode = line ? g_radioInform.channleDisB : g_radioInform.channleDisA;
-    U8 percent;
 
-    if(g_sysRunPara.sysRunMode != MODE_MAIN || g_radioInform.dualRxFlag != 0 || mode != CH_DISNAME
-       || g_ChannelVfoInfo.chVfoInfo[line].chVfoMode != CHAN_MODE || g_rfState == RF_TX
-       || FillChannelName2Buf(g_ChannelVfoInfo.chVfoInfo[line].channelName, nameBuf) != TRUE)
+    if(g_sysRunPara.sysRunMode != MODE_MAIN || g_radioInform.dualRxFlag != 0)
     {
-        return;
+        return SPOT_NONE;
     }
-    percent = BatteryGetPercent();
-    /* Moves one at a time, and only once the average is 2 away, so a value right between two
-       numbers doesn't keep flipping. */
+    if(g_ChannelVfoInfo.chVfoInfo[line].chVfoMode == VFO_MODE)
+    {
+        return SPOT_TOP;
+    }
+    if(mode == CH_DISNAME && FillChannelName2Buf(g_ChannelVfoInfo.chVfoInfo[line].channelName, nameBuf) == TRUE)
+    {
+        return SPOT_LOWER;
+    }
+    return SPOT_NONE;
+}
+
+static U8 CurrentPercent(void)
+{
+    /* A redraw keeps the number on screen: only UpdatePercent changes it. */
+    if(shownPercent == 0xFF)
+    {
+        shownPercent = BatteryGetPercent();
+    }
+    return shownPercent;
+}
+
+/* Moves one at a time, and only once the average is 2 away, so a value right between two numbers
+   doesn't keep flipping. Returns whether it changed. */
+static U8 UpdatePercent(void)
+{
+    U8 percent = BatteryGetPercent();
+
     if(shownPercent == 0xFF)
     {
         shownPercent = percent;
@@ -340,11 +369,180 @@ extern void DisplayBatteryPercentUpdate(void)
     }
     else
     {
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* Fills the free space below the name, without sending it to the screen. */
+static void DrawStatusLower(void)
+{
+    String text[10];
+
+    barWidth = 0xFF;
+    txOnScreen = (g_rfState == RF_TX);
+    if(g_rfState == RF_TX)
+    {
+        sprintf(text, "TX %us", txTicks / 2);
+        LCD_DisplayText(39, 48, (U8 *)text, FONTSIZE_16x16, LCD_DIS_NORMAL);
+    }
+    else
+    {
+        sprintf(text, "%3u%%", CurrentPercent());
+        LCD_DisplayText(39, 56, (U8 *)text, FONTSIZE_16x16, LCD_DIS_NORMAL);
+    }
+}
+
+/* The line above the frequency in VFO mode, without sending it to the screen. */
+static void DrawStatusTop(U8 line, String *text)
+{
+    txOnScreen = (g_rfState == RF_TX);
+    if(g_rfState == RF_TX)
+    {
+        sprintf(text, "VFO %c TX %us  ", line ? 'B' : 'A', txTicks / 2);
+    }
+    else
+    {
+        sprintf(text, "VFO %c %3u%%  ", line ? 'B' : 'A', CurrentPercent());
+    }
+}
+
+static void ShowStatusTop(void)
+{
+    String text[18];
+
+    DrawStatusTop(g_ChannelVfoInfo.switchAB, text);
+    LCD_DisplayText(14, 16, (U8 *)text, FONTSIZE_16x16, LCD_DIS_NORMAL);
+    LCD_UpdateWorkAre();
+}
+
+static void ShowStatusLower(void)
+{
+    ClearStatusLower();
+    DrawStatusLower();
+    LCD_UpdateWorkAre();
+}
+
+/* A relative bar, for comparing signals: the reading is slow and not a calibrated measure. */
+static void ShowSignalBar(void)
+{
+    U16 rssi = Rfic_GetRssiVal();
+    U8 width, x;
+
+    if(rssi <= RSSI_LOW)
+    {
+        width = 0;
+    }
+    else if(rssi >= RSSI_HIGH)
+    {
+        width = BAR_WIDTH - 2;
+    }
+    else
+    {
+        width = (U8)((rssi - RSSI_LOW) * (BAR_WIDTH - 2) / (RSSI_HIGH - RSSI_LOW));
+    }
+    /* Small changes would only make it flicker. */
+    if(barWidth != 0xFF && width + 2 > barWidth && width < barWidth + 2)
+    {
         return;
     }
-    LCD_ClearArea(35, 30, 98, 21);
-    DrawBatteryPercent();
+    if(barWidth == 0xFF)
+    {
+        ClearStatusLower();
+    }
+    barWidth = width;
+    for(x = 0; x < BAR_WIDTH; x++)
+    {
+        if(x == 0 || x == BAR_WIDTH - 1 || x <= width)
+        {
+            gLcdBuffer[BAR_PAGE][BAR_LEFT + x] = 0xFF;
+        }
+        else
+        {
+            gLcdBuffer[BAR_PAGE][BAR_LEFT + x] = 0x81;
+        }
+    }
     LCD_UpdateWorkAre();
+}
+
+/* Called from the battery check, which doesn't run while transmitting or receiving. */
+extern void DisplayBatteryPercentUpdate(void)
+{
+    U8 spot = StatusSpot();
+
+    if(spot == SPOT_NONE || g_rfState == RF_TX || !UpdatePercent())
+    {
+        return;
+    }
+    if(spot == SPOT_TOP)
+    {
+        ShowStatusTop();
+    }
+    else
+    {
+        ShowStatusLower();
+    }
+}
+
+/* Every half second: the TX time and the signal bar. */
+extern void DisplayStatusTask(void)
+{
+    U8 spot;
+
+    if(g_rfState != RF_TX)
+    {
+        txTicks = 0;
+    }
+    else
+    {
+        txTicks++;
+    }
+
+    spot = StatusSpot();
+    if(spot == SPOT_NONE)
+    {
+        return;
+    }
+    if(g_rfState == RF_TX)
+    {
+        if(txTicks % 2 == 0)
+        {
+            if(spot == SPOT_TOP)
+            {
+                ShowStatusTop();
+            }
+            else
+            {
+                ShowStatusLower();
+            }
+        }
+        return;
+    }
+    /* The screen is redrawn just before the transmission officially ends, still showing it. */
+    if(txOnScreen)
+    {
+        if(spot == SPOT_TOP)
+        {
+            ShowStatusTop();
+        }
+        else
+        {
+            ShowStatusLower();
+        }
+        return;
+    }
+    if(spot != SPOT_LOWER)
+    {
+        return;
+    }
+    if(g_rfRxState == WAIT_RXEND && g_sysRunPara.rfRxFlag.rxReceiveOn == ON)
+    {
+        ShowSignalBar();
+    }
+    else if(barWidth != 0xFF)
+    {
+        ShowStatusLower();
+    }
 }
 
 extern void DisplayChannelMsg(U8 disMode,U8 disAB, U8 txOrRx)
@@ -449,7 +647,7 @@ extern void DisplayChannelMsg(U8 disMode,U8 disAB, U8 txOrRx)
         }
         else
         {
-            DrawBatteryPercent();
+            DrawStatusLower();
         }
     }
     else if(disMode == CH_DISCHNUM)
@@ -483,14 +681,7 @@ extern void DisplayChannelName(U8 disAB)
     
     if(g_ChannelVfoInfo.chVfoInfo[disAB].chVfoMode == VFO_MODE)
     {
-        if(disAB)
-        {
-            sprintf(nameBuf,"   VFO B   ");
-        }
-        else
-        {
-            sprintf(nameBuf,"   VFO A   ");
-        }
+        DrawStatusTop(disAB, nameBuf);
     }
     else
     {
@@ -992,7 +1183,7 @@ extern void DisplaySoftVersion(void)
     LCD_DisplayText(4,60-(len<<2),disbuf,FONTSIZE_16x16,LCD_DIS_NORMAL);  
   
     //显示版本号
-    sprintf((String *)&disbuf,"VER:%s","L1.5a" );
+    sprintf((String *)&disbuf,"VER:%s","L1.6c" );
     LCD_DisplayText(24,28,disbuf,FONTSIZE_16x16,LCD_DIS_NORMAL);  
 
     //显示国家码

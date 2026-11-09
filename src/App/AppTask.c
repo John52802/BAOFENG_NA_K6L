@@ -38,6 +38,7 @@ extern void App_500msTask(void)
     g_500msFlag = FALSE;
     BatteryCheckTask();
     CalculateSqlLevel();
+    DisplayStatusTask();
     CheckSjTimeout();
 }
 

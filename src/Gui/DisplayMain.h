@@ -25,6 +25,7 @@ extern void DisplayStateBar(void);
 extern void DisplayHomePage(void);
 extern void DisplayRadioHome(void);
 extern void DisplayBatteryPercentUpdate(void);
+extern void DisplayStatusTask(void);
 extern void DisplayInputChNum(void);
 extern void DisplayInputVfoFreq(void);
 extern void DisplayTxMode(void);

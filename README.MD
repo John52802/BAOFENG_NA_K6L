@@ -21,6 +21,7 @@ Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/
 - Voces en español en una zona libre de la memoria flash, sin borrar las de fábrica. El código fuente no incluye los audios; el `.exe` de las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases) sí.
 - Vista aproximada de espectro (mantener `1` o pulsar `BAND`). Indica actividad, no una frecuencia exacta: el error medido fue de unos 275 kHz en el ancho de 2 MHz y de unos 3 MHz en el de 10 MHz.
 - En modo canal, con la pantalla en Nombre y sin doble escucha, oculta la frecuencia y muestra un porcentaje aproximado de batería. Solo la oculta de la vista: no da privacidad en el aire.
+- Sin doble escucha, muestra los segundos que llevas transmitiendo y una barra relativa de señal al recibir, y el porcentaje también en modo VFO.
 - El silenciador se respeta por debajo de 130 MHz, y el escaneo por frecuencia ya no graba en la flash a cada paso.
 
 ## Fallos corregidos del firmware base
