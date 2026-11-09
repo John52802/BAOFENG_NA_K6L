@@ -27,6 +27,8 @@ pub enum Msg {
     LogoRead(Vec<u8>),
     VfoRead(Vec<u8>),
     FmRead(Vec<u8>),
+    ScanLevels(Vec<u8>, u8),
+    ScanHits(Vec<scan::Hit>),
     Finished(Result<String, String>),
 }
 
@@ -52,6 +54,7 @@ mod fm;
 mod gui;
 mod logo;
 mod restore;
+mod scan;
 mod settings;
 mod theme;
 mod vfo;
@@ -670,6 +673,7 @@ pub enum Action {
     Restore(PathBuf),
     ExportProfile(PathBuf),
     ImportProfile(PathBuf),
+    Scan(scan::Plan),
     ReadFm,
     WriteFm { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadVfo,
@@ -778,6 +782,10 @@ Copia de los canales anteriores en:
             let now = restore::read_all(&mut link)?;
             let wanted = restore::plan_profile(&text, &now)?;
             restore::write_changes(&mut link, &now, &wanted, &dir)
+        }
+        Action::Scan(plan) => {
+            say_waiting();
+            scan::run(&mut link, &plan, &scan::STOP)
         }
         Action::ReadFm => {
             say_waiting();

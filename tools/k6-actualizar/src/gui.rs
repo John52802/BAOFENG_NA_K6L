@@ -2,7 +2,7 @@
 //! thread and reports through `crate::Msg`; a timer in the window collects those messages.
 
 use crate::channels::{self, Channel};
-use crate::{fm, logo, restore, settings, theme, vfo};
+use crate::{fm, logo, restore, scan, settings, theme, vfo};
 use crate::{list_ports, run_action, set_sink, Action, Language, Msg};
 use native_windows_gui as nwg;
 use std::cell::{Cell, RefCell};
@@ -147,6 +147,28 @@ struct Ui {
     fm_saveas: nwg::FileDialog,
     fm_data: RefCell<Option<Vec<u8>>>,
 
+    tab_scan: nwg::Tab,
+    scan_from_label: nwg::Label,
+    scan_from: nwg::TextInput,
+    scan_to_label: nwg::Label,
+    scan_to: nwg::TextInput,
+    scan_step_label: nwg::Label,
+    scan_step: nwg::ComboBox<String>,
+    scan_sens_label: nwg::Label,
+    scan_sens: nwg::ComboBox<String>,
+    scan_start: nwg::Button,
+    scan_stop: nwg::Button,
+    scan_export: nwg::Button,
+    scan_clear: nwg::Button,
+    scan_frame: nwg::ImageFrame,
+    scan_bitmap: RefCell<nwg::Bitmap>,
+    scan_axis: nwg::Label,
+    scan_list: nwg::ListView,
+    scan_saveas: nwg::FileDialog,
+    scan_hits: RefCell<Vec<scan::Hit>>,
+    scan_levels: RefCell<(Vec<u8>, u8)>,
+    scanning: Cell<bool>,
+
     tab_logo: nwg::Tab,
     logo_frame: nwg::ImageFrame,
     logo_bitmap: RefCell<nwg::Bitmap>,
@@ -241,6 +263,15 @@ impl Ui {
         self.restore.set_enabled(has_port);
         self.profile_export.set_enabled(has_port);
         self.profile_import.set_enabled(has_port);
+        let scanning = self.scanning.get();
+        self.scan_from.set_enabled(idle);
+        self.scan_to.set_enabled(idle);
+        self.scan_step.set_enabled(idle);
+        self.scan_sens.set_enabled(idle);
+        self.scan_start.set_enabled(has_port);
+        self.scan_stop.set_enabled(scanning);
+        self.scan_export.set_enabled(idle && !self.scan_hits.borrow().is_empty());
+        self.scan_clear.set_enabled(idle);
         let has_fm = self.fm_data.borrow().is_some();
         self.fm_text.set_enabled(idle && has_fm);
         self.fm_read.set_enabled(has_port);
@@ -325,6 +356,8 @@ impl Ui {
         let mut logo_read = None;
         let mut vfo_read = None;
         let mut fm_read = None;
+        let mut scan_levels = None;
+        let mut scan_hits = None;
         if let Some(rx) = self.rx_msgs.borrow().as_ref() {
             for m in rx.try_iter() {
                 match m {
@@ -338,6 +371,8 @@ impl Ui {
                     Msg::LogoRead(data) => logo_read = Some(data),
                     Msg::VfoRead(data) => vfo_read = Some(data),
                     Msg::FmRead(data) => fm_read = Some(data),
+                    Msg::ScanLevels(levels, limit) => scan_levels = Some((levels, limit)),
+                    Msg::ScanHits(hits) => scan_hits = Some(hits),
                     Msg::Finished(r) => finished = Some(r),
                 }
             }
@@ -357,6 +392,14 @@ impl Ui {
             self.scan_text.set_text(&settings::scan_range(&data));
             *self.settings_data.borrow_mut() = Some(data);
         }
+        if let Some(levels) = scan_levels {
+            *self.scan_levels.borrow_mut() = levels;
+            self.draw_scan();
+        }
+        if let Some(hits) = scan_hits {
+            *self.scan_hits.borrow_mut() = hits;
+            self.fill_scan_list();
+        }
         if let Some(data) = fm_read {
             self.fm_text.set_text(&fm::to_text(&fm::parse(&data)));
             *self.fm_data.borrow_mut() = Some(data);
@@ -373,6 +416,7 @@ impl Ui {
         }
         if let Some(r) = finished {
             *self.rx_msgs.borrow_mut() = None;
+            self.scanning.set(false);
             self.progress_label.set_text("");
             let (status, message, icon) = match r {
                 Ok(text) => (text.clone(), text, nwg::MessageIcons::Info),
@@ -581,6 +625,81 @@ impl Ui {
         match fs::write(&path, vfo::to_csv(&list)) {
             Ok(()) => self.status.set_text(&format!("Exportado: {}", path.display())),
             Err(e) => self.message(&format!("No se pudo guardar: {e}"), nwg::MessageIcons::Error),
+        }
+    }
+
+    fn on_scan_start(&self) {
+        let step = self.scan_step.selection().map_or(scan::STEPS[3].1, |i| scan::STEPS[i].1);
+        let (_, margin, dwell) = scan::SENSITIVITY[self.scan_sens.selection().unwrap_or(1)];
+        let plan = match scan::make_plan(&self.scan_from.text(), &self.scan_to.text(), step, margin, dwell) {
+            Ok(plan) => plan,
+            Err(e) => {
+                self.message(&e, nwg::MessageIcons::Warning);
+                return;
+            }
+        };
+        let high = plan.low + plan.step * (plan.count as u32 - 1);
+        self.scan_axis.set_text(&format!(
+            "{} MHz  a  {} MHz. Línea roja: desde ahí cuenta como señal.",
+            channels::format_mhz(plan.low),
+            channels::format_mhz(high)
+        ));
+        scan::STOP.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.scanning.set(true);
+        self.start(Action::Scan(plan));
+        self.status.set_text("Buscando. Pulsa Detener para terminar; el radio se reiniciará.");
+    }
+
+    fn on_scan_stop(&self) {
+        scan::STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.scan_stop.set_enabled(false);
+        self.status.set_text("Deteniendo...");
+    }
+
+    fn on_scan_export(&self) {
+        if !self.scan_saveas.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.scan_saveas.get_selected_item() else { return };
+        let mut path = PathBuf::from(file);
+        if path.extension().is_none() {
+            path.set_extension("csv");
+        }
+        match fs::write(&path, scan::to_csv(&self.scan_hits.borrow())) {
+            Ok(()) => self.status.set_text(&format!("Exportado: {}", path.display())),
+            Err(e) => self.message(&format!("No se pudo guardar: {e}"), nwg::MessageIcons::Error),
+        }
+    }
+
+    fn on_scan_clear(&self) {
+        self.scan_hits.borrow_mut().clear();
+        *self.scan_levels.borrow_mut() = (Vec::new(), 0);
+        self.fill_scan_list();
+        self.draw_scan();
+        self.update_enabled();
+    }
+
+    fn fill_scan_list(&self) {
+        self.scan_list.clear();
+        for h in self.scan_hits.borrow().iter() {
+            let row = [
+                channels::format_mhz(h.freq),
+                h.level.to_string(),
+                h.times.to_string(),
+                h.last.clone(),
+                scan::accuracy(h).to_string(),
+            ];
+            self.scan_list.insert_items_row(None, &row);
+        }
+    }
+
+    fn draw_scan(&self) {
+        let (w, h) = self.scan_frame.size();
+        let (levels, limit) = &*self.scan_levels.borrow();
+        let bmp = scan::graph_bmp(levels, *limit, w as usize, h as usize);
+        if let Ok(bitmap) = nwg::Bitmap::from_bin(&bmp) {
+            self.scan_frame.set_bitmap(Some(&bitmap));
+            *self.scan_bitmap.borrow_mut() = bitmap;
         }
     }
 
@@ -1009,6 +1128,15 @@ impl Ui {
         self.fm_text.set_size(220, (th - 24) as u32);
         self.fm_hint.set_size((tw - 280) as u32, 120);
 
+        // Search: the graph and the list share the extra height.
+        let graph_h = (th - 72) * 2 / 5;
+        self.scan_frame.set_size((tw - 24) as u32, graph_h as u32);
+        self.scan_axis.set_position(12, 44 + graph_h);
+        self.scan_axis.set_size((tw - 24) as u32, 20);
+        self.scan_list.set_position(12, 66 + graph_h);
+        self.scan_list.set_size((tw - 24) as u32, (th - 72 - graph_h) as u32);
+        self.draw_scan();
+
         // Logo: the preview grows in whole steps, so the dots stay even.
         let scale = (((tw - 412) / logo::WIDTH as i32).min((th - 100) / logo::HEIGHT as i32)).max(2) as usize;
         let (pw, ph) = ((logo::WIDTH * scale) as i32, (logo::HEIGHT * scale) as i32);
@@ -1252,6 +1380,7 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::Tab::builder().text("Ajustes").parent(&ui.tabs).build(&mut ui.tab_settings)?;
     nwg::Tab::builder().text("VFO").parent(&ui.tabs).build(&mut ui.tab_vfo)?;
     nwg::Tab::builder().text("FM").parent(&ui.tabs).build(&mut ui.tab_fm)?;
+    nwg::Tab::builder().text("Buscar").parent(&ui.tabs).build(&mut ui.tab_scan)?;
     nwg::Tab::builder().text("Logo").parent(&ui.tabs).build(&mut ui.tab_logo)?;
 
     let t = &ui.tab_radio;
@@ -1447,6 +1576,57 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .parent(t)
         .build(&mut ui.fm_hint)?;
 
+    let t = &ui.tab_scan;
+    let white = Some([255, 255, 255]);
+    nwg::Label::builder().text("Desde:").position((12, 12)).size((46, 22)).background_color(white).parent(t).build(&mut ui.scan_from_label)?;
+    nwg::TextInput::builder().text("144.0").position((58, 10)).size((76, 26)).parent(t).build(&mut ui.scan_from)?;
+    nwg::Label::builder().text("Hasta:").position((144, 12)).size((42, 22)).background_color(white).parent(t).build(&mut ui.scan_to_label)?;
+    nwg::TextInput::builder().text("148.0").position((186, 10)).size((76, 26)).parent(t).build(&mut ui.scan_to)?;
+    nwg::Label::builder().text("Paso:").position((272, 12)).size((36, 22)).background_color(white).parent(t).build(&mut ui.scan_step_label)?;
+    nwg::ComboBox::builder()
+        .position((310, 10))
+        .size((88, 26))
+        .collection(scan::STEPS.iter().map(|s| s.0.to_string()).collect())
+        .selected_index(Some(3))
+        .parent(t)
+        .build(&mut ui.scan_step)?;
+    nwg::Label::builder().text("Sensibilidad:").position((408, 12)).size((80, 22)).background_color(white).parent(t).build(&mut ui.scan_sens_label)?;
+    nwg::ComboBox::builder()
+        .position((488, 10))
+        .size((76, 26))
+        .collection(scan::SENSITIVITY.iter().map(|s| s.0.to_string()).collect())
+        .selected_index(Some(1))
+        .parent(t)
+        .build(&mut ui.scan_sens)?;
+    nwg::Button::builder().text("Iniciar").position((574, 8)).size((86, 30)).parent(t).build(&mut ui.scan_start)?;
+    nwg::Button::builder().text("Detener").position((666, 8)).size((86, 30)).parent(t).build(&mut ui.scan_stop)?;
+    nwg::Button::builder().text("Exportar CSV...").position((758, 8)).size((120, 30)).parent(t).build(&mut ui.scan_export)?;
+    nwg::Button::builder().text("Limpiar").position((884, 8)).size((86, 30)).parent(t).build(&mut ui.scan_clear)?;
+    nwg::ImageFrame::builder().position((12, 44)).size((960, 90)).parent(t).build(&mut ui.scan_frame)?;
+    nwg::Label::builder()
+        .text("Elige el rango y pulsa Iniciar. Con el cable conectado no se oye por el altavoz del radio.")
+        .position((12, 134))
+        .size((960, 20))
+        .background_color(white)
+        .parent(t)
+        .build(&mut ui.scan_axis)?;
+    nwg::ListView::builder()
+        .position((12, 156))
+        .size((960, 150))
+        .list_style(nwg::ListViewStyle::Detailed)
+        .ex_flags(nwg::ListViewExFlags::FULL_ROW_SELECT | nwg::ListViewExFlags::GRID)
+        .parent(t)
+        .build(&mut ui.scan_list)?;
+    for (i, (text, width)) in [("Frecuencia (MHz)", 130), ("Nivel", 60), ("Veces", 60), ("Última vez", 170), ("Exactitud", 110)].iter().enumerate() {
+        ui.scan_list.insert_column(nwg::InsertListViewColumn {
+            index: Some(i as i32),
+            fmt: None,
+            width: Some(*width),
+            text: Some(text.to_string()),
+        });
+    }
+    ui.scan_list.set_headers_enabled(true);
+
     let t = &ui.tab_logo;
     nwg::ImageFrame::builder().position((12, 12)).size((256, 128)).parent(t).build(&mut ui.logo_frame)?;
     let x = 288;
@@ -1514,6 +1694,11 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .filters("Imágenes (*.png;*.jpg;*.jpeg;*.bmp;*.gif)|Todos (*.*)")
         .build(&mut ui.logo_open)?;
     nwg::FileDialog::builder()
+        .title("Exportar frecuencias encontradas")
+        .action(nwg::FileDialogAction::Save)
+        .filters("CSV (*.csv)")
+        .build(&mut ui.scan_saveas)?;
+    nwg::FileDialog::builder()
         .title("Importar emisoras de FM")
         .action(nwg::FileDialogAction::Open)
         .filters("Listas (*.csv;*.txt)|Todos (*.*)")
@@ -1568,7 +1753,7 @@ pub fn run() {
         return;
     }
     let ui = Rc::new(ui);
-    let pages = [ui.tab_radio.handle, ui.tab_channels.handle, ui.tab_settings.handle, ui.tab_vfo.handle, ui.tab_fm.handle, ui.tab_logo.handle];
+    let pages = [ui.tab_radio.handle, ui.tab_channels.handle, ui.tab_settings.handle, ui.tab_vfo.handle, ui.tab_fm.handle, ui.tab_scan.handle, ui.tab_logo.handle];
     theme::install(&ui.window, &ui.tabs, &pages);
     theme::apply(&ui.window, theme::saved_dark(), false);
     ui.layout();
@@ -1642,6 +1827,14 @@ pub fn run() {
                     ui.on_export_profile();
                 } else if handle == ui.profile_import.handle {
                     ui.on_import_profile();
+                } else if handle == ui.scan_start.handle {
+                    ui.on_scan_start();
+                } else if handle == ui.scan_stop.handle {
+                    ui.on_scan_stop();
+                } else if handle == ui.scan_export.handle {
+                    ui.on_scan_export();
+                } else if handle == ui.scan_clear.handle {
+                    ui.on_scan_clear();
                 } else if handle == ui.fm_read.handle {
                     ui.start(Action::ReadFm);
                 } else if handle == ui.fm_save.handle {

@@ -510,3 +510,145 @@ extern void EnterSpectrumMode(void)
     DisplayHomePage();
     BeepOut(BEEP_EXITMENU);
 }
+
+/*
+ * PC mode: the program asks for sweeps and gets one level byte per frequency.
+ *
+ * Like the spectrum, it never calls PTT_ScanTask or RF_Task, so the radio can't enter TX here.
+ * It ends with a restart: on 'E' from the PC, on the EXIT key, or when the PC goes quiet.
+ *
+ * 'S' start(U32) step(U32) count(U16) dwell(U16) down(U8) xor(U8), little endian, frequencies
+ * in units of 10 Hz. Replies 'S' and the levels, or 'N' if the request isn't valid.
+ */
+#define PC_FRAME_LEN    15
+#define PC_MAX_POINTS   8000
+#define PC_MIN_STEP     250
+#define PC_MIN_DWELL    5
+#define PC_MAX_DWELL    2000
+#define PC_IDLE_TICKS   50    /* Of 100 ms: 5 s without a request. */
+#define PC_ACK          0x06
+
+static U16 pcNormalAgc;
+
+static void PcExit(void)
+{
+    Rfic_WriteWord(SP_AGC_REG, pcNormalAgc);
+    SpeakerSwitch(OFF);
+    NVIC_SystemReset();
+}
+
+static void PcService(void)
+{
+    SpServiceTasks();
+    if(g_keyScan.keyEvent != KEYID_NONE && Key_GetRealEvent() == KEYID_EXIT)
+    {
+        PcExit();
+    }
+    if(progrom.dataNum != 0 && progrom.rxBuf[0] == 'E')
+    {
+        uartSendChar(PC_ACK);
+        PcExit();
+    }
+}
+
+static void PcSweep(void)
+{
+    U32 start, step, span, freq;
+    U16 count, dwell, i, reading;
+    U8  down, check = 0, valid;
+
+    for(i = 0; i < PC_FRAME_LEN - 1; i++)
+    {
+        check ^= progrom.rxBuf[i];
+    }
+    memcpy(&start, &progrom.rxBuf[1], 4);
+    memcpy(&step, &progrom.rxBuf[5], 4);
+    memcpy(&count, &progrom.rxBuf[9], 2);
+    memcpy(&dwell, &progrom.rxBuf[11], 2);
+    down = progrom.rxBuf[13];
+
+    valid = (check == progrom.rxBuf[PC_FRAME_LEN - 1])
+         && count >= 1 && count <= PC_MAX_POINTS
+         && dwell >= PC_MIN_DWELL && dwell <= PC_MAX_DWELL
+         && step >= PC_MIN_STEP
+         && start >= SP_RX_MIN && start < SP_RX_MAX;
+    if(valid && count > 1)
+    {
+        /* Divides first, because the product might not fit. */
+        valid = step <= (SP_RX_MAX - SP_RX_MIN) / (count - 1);
+    }
+    span = valid ? step * (count - 1) : 0;
+    if(valid)
+    {
+        valid = down ? (start >= SP_RX_MIN + span) : (start + span < SP_RX_MAX);
+    }
+
+    progrom.dataNum = 0;
+    if(!valid)
+    {
+        uartSendChar('N');
+        return;
+    }
+    uartSendChar('S');
+
+    SpTune(start);
+    DelayMs(SP_FIND_WAIT);
+    for(i = 0; i < count; i++)
+    {
+        PcService();
+        freq = down ? start - step * i : start + step * i;
+        SpTune(freq);
+        DelayMs(dwell);
+        reading = Rfic_GetRssiVal();
+        uartSendChar((reading > 0xFF) ? 0xFF : (U8)reading);
+    }
+}
+
+extern void EnterPcScanMode(void)
+{
+    U8 idle = 0, tick;
+
+    DualStandbyWorkOFF();
+    RfOff();
+    Rfic_ConfigRxMode();
+    Rfic_SwitchFM_AM(ModeFM);
+    SpeakerSwitch(OFF);
+    spLastBand = 0xFF; /* RfOff above cut the RX path, force it back on. */
+
+    pcNormalAgc = Rfic_ReadWord(SP_AGC_REG);
+    Rfic_WriteWord(SP_AGC_REG, (pcNormalAgc & SP_AGC_MASK) | SP_AGC_FIXED);
+
+    LCD_ClearFullBuf();
+    SpShowText(14, 36, "MODO PC", FONTSIZE_16x16);
+    SpShowText(32, 32, "BUSCANDO", FONTSIZE_16x16);
+    SpShowText(50, 34, "EXIT SALE", FONTSIZE_12x12);
+    LCD_UpdateFullScreen();
+    LCD_BackLightSetOn();
+
+    DelayMs(SP_START_WAIT);
+    progrom.dataNum = 0;
+    uartSendChar(PC_ACK);
+
+    while(1)
+    {
+        tick = g_100msFlag;
+        PcService();
+        if(tick && ++idle >= PC_IDLE_TICKS)
+        {
+            PcExit();
+        }
+        if(progrom.dataNum == 0)
+        {
+            continue;
+        }
+        if(progrom.rxBuf[0] != 'S')
+        {
+            progrom.dataNum = 0;
+        }
+        else if(progrom.dataNum >= PC_FRAME_LEN)
+        {
+            PcSweep();
+            idle = 0;
+        }
+    }
+}

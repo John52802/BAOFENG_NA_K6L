@@ -14,6 +14,7 @@ const U8 strModelType[] = {"UVK6"};
 #define PRG_CMD_FLASH          'D'               //更新开机界面
 #define PRG_CMD_WRITE          'W'               //写频命令
 #define PRG_CMD_READ           'R'               //读频命令
+#define PRG_CMD_PC_SCAN        'S'               /* PC mode, in AppSpectrum.c: restarts when it ends. */
 #define PRG_CMD_END            'E'               //结束命令
 
 /*********************************************************************/
@@ -323,6 +324,10 @@ extern void EnterProgromMode(void)
                         ProgromSendFreqRange();
                         progrom.dataNum = 0;
                         progrom.states = PRG_WR;   
+                    }
+                    else if(progromCmd == PRG_CMD_PC_SCAN)
+                    {
+                        EnterPcScanMode();
                     }
                     else if(progromCmd == PRG_CMD_FLASH)
                     {
