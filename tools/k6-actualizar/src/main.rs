@@ -23,6 +23,8 @@ pub enum Msg {
     Log(String),
     Progress(String, f32),
     ChannelsRead(Vec<u8>),
+    SettingsRead(Vec<u8>),
+    LogoRead(Vec<u8>),
     Finished(Result<String, String>),
 }
 
@@ -45,6 +47,8 @@ macro_rules! say {
 
 mod channels;
 mod gui;
+mod logo;
+mod settings;
 
 // Built-in files, present only when build.rs finds them in out/. Without them the program
 // still works: firmware is chosen from a file, and Spanish voices are not offered.
@@ -412,7 +416,8 @@ fn write_channel_range(link: &mut dyn Link, addr: usize, data: &[u8]) -> Res<()>
 }
 
 /// Puts the running firmware in flash mode, trying both DTR/RTS states.
-fn enter_flash_mode(link: &mut dyn Link, wait_ms: u64) -> Res<()> {
+/// Makes contact with the running firmware, which then waits for the next step.
+fn open_link(link: &mut dyn Link, wait_ms: u64) -> Res<()> {
     let header = b"PROGRAMBF-K6PROU";
     let deadline = Instant::now() + Duration::from_millis(wait_ms);
     let mut lines = false;
@@ -436,6 +441,11 @@ fn enter_flash_mode(link: &mut dyn Link, wait_ms: u64) -> Res<()> {
         lines = !lines;
         pause(MS_LINK_RETRY);
     }
+    Ok(())
+}
+
+fn enter_flash_mode(link: &mut dyn Link, wait_ms: u64) -> Res<()> {
+    open_link(link, wait_ms)?;
     pause(MS_PAUSE);
     link.clear_input();
     link.send(b"D")?;
@@ -649,6 +659,10 @@ pub enum Action {
     SetLanguage(Language),
     ReadChannels,
     WriteChannels { loaded: Vec<u8>, wanted: Vec<u8> },
+    ReadSettings,
+    WriteSettings { loaded: Vec<u8>, wanted: Vec<u8> },
+    ReadLogo,
+    WriteLogo { loaded: Vec<u8>, screen: Vec<u8> },
 }
 
 fn apply_language(link: &mut dyn Link, language: Language, dir: &PathBuf) -> Res<PathBuf> {
@@ -730,6 +744,41 @@ Copia de los canales anteriores en:
                     path.display()
                 )
             })
+        }
+        Action::ReadLogo => {
+            say_waiting();
+            let data = logo::read_from_radio(&mut link)?;
+            emit(Msg::LogoRead(data));
+            Ok("Logo leído.".to_string())
+        }
+        Action::WriteLogo { loaded, screen } => {
+            say_waiting();
+            let path = logo::write_to_radio(&mut link, &loaded, &screen, &dir)?;
+            Ok(format!(
+                "Logo guardado y verificado. Para verlo, en Ajustes pon Inicio: pantalla en Logo.
+
+Copia del logo anterior en:
+{}",
+                path.display()
+            ))
+        }
+        Action::ReadSettings => {
+            say_waiting();
+            let data = settings::read_from_radio(&mut link)?;
+            emit(Msg::SettingsRead(data));
+            Ok("Ajustes leídos.".to_string())
+        }
+        Action::WriteSettings { loaded, wanted } => {
+            say_waiting();
+            let (check, path) = settings::write_to_radio(&mut link, &loaded, &wanted, &dir)?;
+            emit(Msg::SettingsRead(check));
+            Ok(format!(
+                "Ajustes guardados y comprobados tras reiniciar el radio.
+
+Copia de los ajustes anteriores en:
+{}",
+                path.display()
+            ))
         }
     }
 }
@@ -903,6 +952,7 @@ mod tests {
         need_lines: Option<bool>,
         lines: bool,
         allow_channels: bool,
+        allow_logo: bool,
     }
 
     impl FakeRadio {
@@ -926,6 +976,7 @@ mod tests {
                 need_lines: None,
                 lines: false,
                 allow_channels: false,
+                allow_logo: false,
             }
         }
         fn status(&mut self, p: &[u8]) {
@@ -971,7 +1022,8 @@ mod tests {
                 }
                 CMD_WRITE => {
                     let in_channels = self.allow_channels && self.start + len <= channels::CHANNEL_AREA;
-                    assert!(self.start >= ES_BASE || in_channels, "Write at {:X}", self.start);
+                    let in_logo = self.allow_logo && self.start >= 0xC_0000 && self.start + len <= 0xC_1000;
+                    assert!(self.start >= ES_BASE || in_channels || in_logo, "Write at {:X}", self.start);
                     assert_eq!((p[2] as u16) << 8 | p[3] as u16, self.next);
                     for (i, b) in d.iter().enumerate() {
                         self.flash[self.start + i] &= b; // NOR flash only clears bits.
@@ -985,7 +1037,8 @@ mod tests {
                     let addr = u32::from_le_bytes([d[0], d[1], d[2], d[3]]) as usize;
                     assert_eq!((d[4], d[5]), (0, 1));
                     let in_channels = self.allow_channels && addr + SECTOR <= channels::CHANNEL_AREA;
-                    assert!((addr >= ES_BASE || in_channels) && addr % SECTOR == 0, "Erase at {addr:X}");
+                    let in_logo = self.allow_logo && addr == 0xC_0000;
+                    assert!((addr >= ES_BASE || in_channels || in_logo) && addr % SECTOR == 0, "Erase at {addr:X}");
                     self.flash[addr..addr + SECTOR].fill(0xFF);
                     self.status(p);
                 }
@@ -1085,6 +1138,37 @@ mod tests {
         let backup = radio.flash.clone();
         assert!(write_voices(&mut radio, &backup, VOICES).is_err());
         assert_eq!(radio.flash, backup);
+    }
+
+    #[test]
+    fn saving_the_logo_only_touches_its_sector_and_keeps_the_rest_of_it() {
+        let mut radio = FakeRadio::new();
+        radio.allow_logo = true;
+        radio.flash[0xC_0000..0xC_0400].fill(0x00);
+        radio.flash[0xC_0400] = 0x5A; // Past the picture: must stay.
+        radio.flash[0xBF_FF] = 0x33; // Sector before: must stay.
+        radio.flash[0xC_1000] = 0x44; // Sector after: must stay.
+        let before = radio.flash.clone();
+        let dir = temp_dir("logo");
+
+        let loaded = logo::read_from_radio(&mut radio).unwrap();
+        assert_eq!(loaded, before[0xC_0000..0xC_1000]);
+        let screen = vec![0xA5u8; logo::SCREEN_SIZE];
+        let copy = logo::write_to_radio(&mut radio, &loaded, &screen, &dir).unwrap();
+
+        assert_eq!(radio.flash[0xC_0000..0xC_0400], screen[..]);
+        assert_eq!(radio.flash[0xC_0400..0xC_1000], before[0xC_0400..0xC_1000]);
+        assert_eq!(radio.flash[..0xC_0000], before[..0xC_0000]);
+        assert_eq!(radio.flash[0xC_1000..], before[0xC_1000..]);
+        assert_eq!(fs::read(copy).unwrap(), loaded);
+        assert!(radio.ended);
+
+        // A logo changed on the radio since reading must stop the save.
+        let mut radio2 = FakeRadio::new();
+        radio2.allow_logo = true;
+        assert!(logo::write_to_radio(&mut radio2, &loaded, &screen, &dir).is_err());
+        assert!(radio2.flash[0xC_0000..0xC_0400].iter().all(|&b| b == 0xFF));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

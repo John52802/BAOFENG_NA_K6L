@@ -3,6 +3,7 @@
 extern void UI_DisplayPowerOn(void)
 {
     U8 i;
+    U16 wait;
     U8 picDisBuf[1024+1] = {0};
 
     SC5620_SetContpastRatio(g_radioInform.brightness);
@@ -30,8 +31,20 @@ extern void UI_DisplayPowerOn(void)
         DisplayBatteryVol(0);
     }
 
+    /* Everything above only draws into the RAM buffer: this is what puts it on the screen. */
+    LCD_UpdateFullScreen();
     LcdBackLightSwitch(LED_ON);
     //延时500ms
-    DelayMs(500);
+    /* Long enough to see the logo or message; the battery voltage screen keeps its short wait.
+       Counted on the 1 ms tick, because the compiler removes the empty loop inside DelayMs. */
+    wait = (g_radioInform.OpFlag1.Bit.b0 <= 1) ? 2000 : 500;
+    while(wait)
+    {
+        if(g_msFlag)
+        {
+            g_msFlag = FALSE;
+            wait--;
+        }
+    }
 }
 

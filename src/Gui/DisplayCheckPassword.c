@@ -12,6 +12,8 @@ extern void DisplayPassword(void)
         buf[i] = '*';
     }
     LCD_DisplayText(39,40,(U8 *)buf, FONTSIZE_16x16,LCD_DIS_NORMAL);
+    /* LCD_DisplayText only draws into the RAM buffer. */
+    LCD_UpdateFullScreen();
 }
 extern void DisplayPasswordHome(void)
 {
@@ -23,10 +25,21 @@ extern void DisplayPasswordHome(void)
 
 extern void DisplayPasswordError(void)
 {
+    U16 wait;
+
     LCD_ClearFullBuf();
     LCD_DisplayText(23,12,(U8 *)((g_radioInform.language == LANG_CN)?"   密码错误   ":"Password Error"), FONTSIZE_16x16,LCD_DIS_NORMAL);
     LCD_UpdateFullScreen();
-    DelayMs(2000);
+    /* Counted on the 1 ms tick, because the compiler removes the empty loop inside DelayMs. */
+    wait = 2000;
+    while(wait)
+    {
+        if(g_msFlag)
+        {
+            g_msFlag = FALSE;
+            wait--;
+        }
+    }
     ResetInputBuf();
     DisplayPasswordHome();
 }
@@ -141,6 +154,8 @@ void App_CheckPowerOnPassword(void)
                    BeepOut(BEEP_NULL);
                    break;
             }
+            /* Each press is handled once. */
+            g_keyScan.keyEvent = KEYID_NONE;
         }
     }
 }
