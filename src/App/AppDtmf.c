@@ -91,7 +91,9 @@ extern void GetDtmfEditCode(void)
         return;
     }
     
-    DisplayRadioHome();
+    /* Clears the buffer first: the edit window drew over this area, and its dashes and digits
+       would stay mixed with the home screen during the transmission. */
+    DisplayHomePage();
 
     if(g_inputbuf.len == 0)
     {//无输入时，直接退出该模式

@@ -32,6 +32,8 @@ Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/
 - Tonos de RX y TX intercambiados al guardarlos en modo VFO.
 - Logo y mensaje de encendido que nunca llegaban a verse.
 - Pantalla de clave de encendido inutilizable: las teclas se repetían solas y los números no se veían.
+- Esperas del firmware (`DelayMs`, `DelayUs`) que el compilador eliminaba, de modo que no esperaban nada.
+- Restos de la ventana de DTMF mezclados con la pantalla al transmitir.
 
 ## Compilar el firmware
 

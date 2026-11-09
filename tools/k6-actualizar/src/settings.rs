@@ -91,7 +91,7 @@ pub const FIELDS: &[Field] = &[
     Field { label: "Modo B", menu: "", member: "chOrVfoMode.Bit.chVofB", offset: 26, mask: 0x0F, shift: 4, options: WORK_MODE },
     byte("Teclado bloq.", "", "keyLock", 27, ON_OFF),
     byte("Desactivar FM", "", "fmEnale", 25, ON_OFF),
-    byte("Alarma también", "", "alarmLocal", 18, ON_OFF),
+    byte("Alarma local", "", "alarmLocal", 18, ON_OFF),
     byte("Aviso fin de TX", "", "toa", 40, &["No", "1 s", "2 s", "3 s", "4 s", "5 s", "6 s", "7 s", "8 s", "9 s", "10 s"]),
 ];
 

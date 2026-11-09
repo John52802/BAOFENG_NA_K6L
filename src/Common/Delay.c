@@ -2,7 +2,8 @@
 
 void DelayUs(U16 n)// 1US
 {
-    U16 t = n * 8;
+    /* Volatile: otherwise the compiler removes this empty loop and every delay waits nothing. */
+    volatile U16 t = n * 8;
     while(t--){
 	
     }

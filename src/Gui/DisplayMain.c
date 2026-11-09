@@ -923,7 +923,7 @@ extern void DisplaySoftVersion(void)
     LCD_DisplayText(4,60-(len<<2),disbuf,FONTSIZE_16x16,LCD_DIS_NORMAL);  
   
     //显示版本号
-    sprintf((String *)&disbuf,"VER:%s","L1.2d" );
+    sprintf((String *)&disbuf,"VER:%s","L1.3b" );
     LCD_DisplayText(24,28,disbuf,FONTSIZE_16x16,LCD_DIS_NORMAL);  
 
     //显示国家码
