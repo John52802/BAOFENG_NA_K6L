@@ -280,11 +280,20 @@ void  DTCSS_WithRfic(U32 DCS_Code, U8 flagLearning)
 
     if(flagLearning == 0)
     {
-        PREDCS_CODE = DCS_Code & (~BIT15);
-        GOLAY_ENCODE(PREDCS_CODE); 
-        PREDCS_CODE = DCS_Code & (~BIT15);
-        DCSCale(g_CurrentVfo->fhssFlag, hoping_freq, PREDCS_CODE);    
-        if(g_CurrentVfo->tx->dcsCtsType == SUBAUDIO_DCS_I)
+        /* Channels store a menu index: 1-105 normal, 106-210 inverted. The code sent on air
+           comes from DCS_TAB, as the menu display and CheckIsStandardDCS already assume. */
+        if(DCS_Code >= 1 && DCS_Code <= 210)
+        {
+            PREDCS_CODE = DCS_TAB[(DCS_Code - 1) % 105];
+        }
+        else
+        {
+            PREDCS_CODE = DCS_Code & (~BIT15);
+        }
+        GOLAY_ENCODE(PREDCS_CODE);
+        DCSCale(g_CurrentVfo->fhssFlag, hoping_freq, PREDCS_CODE);
+        /* This also runs for RX, so the polarity must come from this code and not from the TX one. */
+        if(DCS_Code > 105 && DCS_Code <= 210)
         {
             mask = 0xA000;
         }

@@ -28,6 +28,8 @@ Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/
 - Cuelgue en el menú `FM BAND` en modo canal, y quedar atrapado en el menú FM mientras se recibe.
 - Desplazamientos del menú guardados multiplicados por 10, que hacían transmitir en otra frecuencia.
 - Transmisión en frecuencias no permitidas usando la inversión.
+- Código DCS al aire distinto del que muestra la pantalla, y polaridad de recepción tomada del tono de transmisión.
+- Tonos de RX y TX intercambiados al guardarlos en modo VFO.
 
 ## Compilar el firmware
 
@@ -39,7 +41,7 @@ Con el cable de programación conectado, enciende el radio con los 2 botones lat
 
 ## Programa para Windows
 
-`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces y edita canales. Solo escribe en las zonas de voces y canales de la memoria flash externa, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
+`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces y edita canales, con sus tonos CTCSS y DCS. Solo escribe en las zonas de voces y canales de la memoria flash externa, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
 
 Para compilarlo desde `tools/k6-actualizar`:
 

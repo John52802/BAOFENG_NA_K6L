@@ -55,6 +55,11 @@ struct Ui {
     tx: nwg::TextInput,
     name_label: nwg::Label,
     name: nwg::TextInput,
+    rx_tone_label: nwg::Label,
+    rx_tone: nwg::TextInput,
+    tx_tone_label: nwg::Label,
+    tx_tone: nwg::TextInput,
+    tone_hint: nwg::Label,
     apply: nwg::Button,
     delete: nwg::Button,
     read: nwg::Button,
@@ -250,6 +255,8 @@ impl Ui {
                 channels::format_mhz(c.rx),
                 channels::format_mhz(c.tx),
                 c.name.clone(),
+                channels::format_tone(c.rx_tone),
+                channels::format_tone(c.tx_tone),
             ];
             self.list.insert_items_row(None, &row);
         }
@@ -263,6 +270,8 @@ impl Ui {
         self.rx.set_text(&channels::format_mhz(c.rx));
         self.tx.set_text(&channels::format_mhz(c.tx));
         self.name.set_text(&c.name);
+        self.rx_tone.set_text(&channels::format_tone(c.rx_tone));
+        self.tx_tone.set_text(&channels::format_tone(c.tx_tone));
     }
 
     fn edited_channel(&self) -> Result<Channel, String> {
@@ -280,7 +289,9 @@ impl Ui {
         let tx = if tx_text.trim().is_empty() { rx } else { channels::parse_mhz(&tx_text)? };
         let name = self.name.text().trim().to_string();
         channels::check_name(&name)?;
-        Ok(Channel { number, rx, tx, name })
+        let rx_tone = channels::parse_tone(&self.rx_tone.text())?;
+        let tx_tone = channels::parse_tone(&self.tx_tone.text())?;
+        Ok(Channel { number, rx, tx, name, rx_tone, tx_tone })
     }
 
     fn on_apply(&self) {
@@ -326,7 +337,7 @@ impl Ui {
             "Guardar canales",
             "Se guardará antes una copia de los canales actuales y luego se\n\
              reescribirán solo las zonas de memoria que cambiaron.\n\n\
-             Los tonos, la potencia y los demás ajustes de cada canal se conservan.\n\
+             La potencia y los demás ajustes de cada canal se conservan.\n\
              No desconectes el cable ni apagues el radio durante el proceso.",
         );
         if ok {
@@ -344,7 +355,7 @@ impl Ui {
         let Ok(file) = self.csv_open.get_selected_item() else { return };
         let result = fs::read_to_string(&file)
             .map_err(|e| format!("No se pudo leer el archivo: {e}"))
-            .and_then(|text| channels::from_csv(&text));
+            .and_then(|text| channels::from_csv(&text, &self.channels.borrow()));
         match result {
             Ok(list) => {
                 let n = list.len();
@@ -425,12 +436,12 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     let t = &ui.tab_channels;
     nwg::ListView::builder()
         .position((10, 10))
-        .size((440, 250))
+        .size((440, 222))
         .list_style(nwg::ListViewStyle::Detailed)
         .ex_flags(nwg::ListViewExFlags::FULL_ROW_SELECT | nwg::ListViewExFlags::GRID)
         .parent(t)
         .build(&mut ui.list)?;
-    for (i, (text, width)) in [("Canal", 60), ("RX (MHz)", 110), ("TX (MHz)", 110), ("Nombre", 130)].iter().enumerate() {
+    for (i, (text, width)) in [("Canal", 46), ("RX (MHz)", 78), ("TX (MHz)", 78), ("Nombre", 98), ("Tono RX", 66), ("Tono TX", 66)].iter().enumerate() {
         ui.list.insert_column(nwg::InsertListViewColumn {
             index: Some(i as i32),
             fmt: None,
@@ -449,8 +460,13 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::TextInput::builder().position((x + 114, 82)).size((110, 26)).parent(t).build(&mut ui.tx)?;
     nwg::Label::builder().text("Nombre:").position((x, 120)).size((110, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.name_label)?;
     nwg::TextInput::builder().limit(12).position((x + 114, 118)).size((110, 26)).parent(t).build(&mut ui.name)?;
-    nwg::Button::builder().text("Aplicar").position((x, 158)).size((110, 32)).parent(t).build(&mut ui.apply)?;
-    nwg::Button::builder().text("Borrar canal").position((x + 114, 158)).size((110, 32)).parent(t).build(&mut ui.delete)?;
+    nwg::Label::builder().text("Tono RX:").position((x, 156)).size((110, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.rx_tone_label)?;
+    nwg::TextInput::builder().limit(6).position((x + 114, 154)).size((110, 26)).parent(t).build(&mut ui.rx_tone)?;
+    nwg::Label::builder().text("Tono TX:").position((x, 192)).size((110, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.tx_tone_label)?;
+    nwg::TextInput::builder().limit(6).position((x + 114, 190)).size((110, 26)).parent(t).build(&mut ui.tx_tone)?;
+    nwg::Button::builder().text("Aplicar").position((x, 226)).size((110, 32)).parent(t).build(&mut ui.apply)?;
+    nwg::Button::builder().text("Borrar canal").position((x + 114, 226)).size((110, 32)).parent(t).build(&mut ui.delete)?;
+    nwg::Label::builder().text("Tonos: 88.5 (CTCSS), D023N o D023I (DCS). Vacío: sin tono.").position((10, 238)).size((440, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.tone_hint)?;
 
     nwg::Button::builder().text("Leer del radio").position((10, 270)).size((150, 32)).parent(t).build(&mut ui.read)?;
     nwg::Button::builder().text("Guardar en radio").position((170, 270)).size((150, 32)).parent(t).build(&mut ui.save)?;

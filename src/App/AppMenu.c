@@ -736,11 +736,11 @@ extern void SaveRadioCtcss(U8 tx)
     {
         if(tx)
         {
-            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].rxDCSCTSNum = ctcss; 
+            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].txDCSCTSNum = ctcss; 
         }
         else
         {
-            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].txDCSCTSNum = ctcss;
+            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].rxDCSCTSNum = ctcss;
         }
         g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].vfoFlag.Byte &= 0xFE;
     }
@@ -776,11 +776,11 @@ extern void SaveRadioDcs(U8 tx)
     {
         if(tx)
         {
-            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].rxDCSCTSNum = dcs; 
+            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].txDCSCTSNum = dcs; 
         }
         else
         {
-            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].txDCSCTSNum = dcs;
+            g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].rxDCSCTSNum = dcs;
         }
         g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].vfoFlag.Byte &= 0xFE;
     }
