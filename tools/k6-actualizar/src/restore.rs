@@ -3,7 +3,7 @@
 //! Every write goes through the same module as editing by hand, so each one keeps its own copy
 //! first and checks what the radio saved. Nothing here can touch calibration.
 
-use crate::{channels, logo, settings, vfo, Link, Res, FLASH_SIZE, SECTOR};
+use crate::{channels, fm, logo, settings, vfo, Link, Res, FLASH_SIZE, SECTOR};
 use std::path::Path;
 
 const FULL_LOGO_AT: usize = 0xC_0000;
@@ -13,6 +13,7 @@ pub enum Kind {
     Channels,
     Settings,
     Vfo,
+    Fm,
     Logo,
     /// A whole flash copy. Only its channels and logo can be used: settings and VFO are stored
     /// there in the radio's rotating logs, and its calibration must never travel back.
@@ -26,6 +27,8 @@ pub fn classify(name: &str, len: usize) -> Res<Kind> {
     let kind = match len {
         channels::CHANNEL_AREA => Kind::Channels,
         settings::SETTINGS_SIZE => Kind::Settings,
+        // VFO and FM copies have the same size, so here the name decides.
+        settings::BLOCK_SIZE if name.contains("_fm_") => Kind::Fm,
         settings::BLOCK_SIZE => Kind::Vfo,
         SECTOR => Kind::Logo,
         FLASH_SIZE => Kind::FullFlash,
@@ -35,6 +38,7 @@ pub fn classify(name: &str, len: usize) -> Res<Kind> {
         Kind::Channels => "canales",
         Kind::Settings => "ajustes",
         Kind::Vfo => "vfo",
+        Kind::Fm => "fm",
         Kind::Logo => "logo",
         Kind::FullFlash => "flash",
     };
@@ -81,6 +85,14 @@ pub fn restore(link: &mut dyn Link, kind: Kind, data: &[u8], dir: &Path) -> Res<
             vfo::write_to_radio(link, &loaded, data, dir)?;
             Ok("VFO restaurados y comprobados tras reiniciar el radio.".into())
         }
+        Kind::Fm => {
+            let loaded = fm::read_from_radio(link)?;
+            if loaded == data {
+                return Ok("Las emisoras ya eran iguales a la copia.".into());
+            }
+            fm::write_to_radio(link, &loaded, data, dir)?;
+            Ok("Emisoras restauradas y comprobadas tras reiniciar el radio.".into())
+        }
         Kind::Logo => restore_logo(link, &data[..logo::SCREEN_SIZE], dir),
         Kind::FullFlash => {
             let first = restore_channels(link, &data[..channels::CHANNEL_AREA], dir)?;
@@ -93,39 +105,43 @@ pub fn restore(link: &mut dyn Link, kind: Kind, data: &[u8], dir: &Path) -> Res<
 const SECTION_CHANNELS: &str = "[canales]";
 const SECTION_VFO: &str = "[vfo]";
 const SECTION_SETTINGS: &str = "[ajustes]";
+const SECTION_FM: &str = "[fm]"; // Optional: profiles saved before it existed don't have it.
 
 /// What a radio holds, as read from it.
 pub struct RadioData {
     pub channels: Vec<u8>,
     pub vfo: Vec<u8>,
     pub settings: Vec<u8>,
+    pub fm: Vec<u8>,
 }
 
 pub fn read_all(link: &mut dyn Link) -> Res<RadioData> {
     let channels = channels::read_from_radio(link)?;
     let vfo = vfo::read_from_radio(link)?;
     let settings = settings::read_from_radio(link)?;
-    Ok(RadioData { channels, vfo, settings })
+    let fm = fm::read_from_radio(link)?;
+    Ok(RadioData { channels, vfo, settings, fm })
 }
 
 /// A profile: the three CSV formats in one text file. It never holds the password.
 pub fn to_profile(data: &RadioData) -> String {
     let choices: Vec<Option<usize>> = settings::FIELDS.iter().map(|f| settings::selected(&data.settings, f)).collect();
     format!(
-        "{SECTION_CHANNELS}\r\n{}{SECTION_VFO}\r\n{}{SECTION_SETTINGS}\r\n{}",
+        "{SECTION_CHANNELS}\r\n{}{SECTION_VFO}\r\n{}{SECTION_SETTINGS}\r\n{}{SECTION_FM}\r\n{}",
         channels::to_csv(&channels::parse_channels(&data.channels)),
         vfo::to_csv(&vfo::parse(&data.vfo)),
         settings::to_full_csv(&choices, &settings::message(&data.settings), &settings::scan_range(&data.settings)),
+        fm::to_csv(&fm::parse(&data.fm)),
     )
 }
 
-fn sections(text: &str) -> Res<(String, String, String)> {
-    let mut parts = [String::new(), String::new(), String::new()];
-    let mut seen = [false; 3];
+fn sections(text: &str) -> Res<(String, String, String, Option<String>)> {
+    let mut parts = [String::new(), String::new(), String::new(), String::new()];
+    let mut seen = [false; 4];
     let mut current = None;
     for line in text.lines() {
         let clean = line.trim().trim_start_matches('\u{feff}');
-        let at = [SECTION_CHANNELS, SECTION_VFO, SECTION_SETTINGS].iter().position(|s| clean.eq_ignore_ascii_case(s));
+        let at = [SECTION_CHANNELS, SECTION_VFO, SECTION_SETTINGS, SECTION_FM].iter().position(|s| clean.eq_ignore_ascii_case(s));
         if let Some(i) = at {
             if seen[i] {
                 return Err(format!("El perfil repite la sección {clean}."));
@@ -139,17 +155,17 @@ fn sections(text: &str) -> Res<(String, String, String)> {
             return Err("Este archivo no es un perfil: debe empezar con [canales].".into());
         }
     }
-    if seen != [true; 3] {
+    if seen[..3] != [true; 3] {
         return Err("El perfil debe tener las secciones [canales], [vfo] y [ajustes].".into());
     }
-    let [a, b, c] = parts;
-    Ok((a, b, c))
+    let [a, b, c, d] = parts;
+    Ok((a, b, c, seen[3].then_some(d)))
 }
 
 /// What to write for a profile over what the radio holds. Checks the whole file before anything
 /// is written, so a mistake in its last line can't leave a radio half changed.
 pub fn plan_profile(text: &str, now: &RadioData) -> Res<RadioData> {
-    let (channel_text, vfo_text, settings_text) = sections(text)?;
+    let (channel_text, vfo_text, settings_text, fm_text) = sections(text)?;
     let list = channels::from_csv(&channel_text, &channels::parse_channels(&now.channels)).map_err(|e| format!("Canales: {e}"))?;
     let new_channels = channels::apply_channels(&now.channels, &list).map_err(|e| format!("Canales: {e}"))?;
     let vfos = vfo::from_csv(&vfo_text, &vfo::parse(&now.vfo)).map_err(|e| format!("VFO: {e}"))?;
@@ -159,7 +175,14 @@ pub fn plan_profile(text: &str, now: &RadioData) -> Res<RadioData> {
     let applied = settings::apply(&now.settings, &choices, &shown).map_err(|e| format!("Ajustes: {e}"))?;
     let scan = settings::scan_from_csv(&settings_text).unwrap_or_else(|| settings::scan_range(&now.settings));
     let new_settings = settings::apply_scan_range(&applied, &scan).map_err(|e| format!("Ajustes: {e}"))?;
-    Ok(RadioData { channels: new_channels, vfo: new_vfo, settings: new_settings })
+    let new_fm = match fm_text {
+        Some(list) => {
+            let list = fm::parse_list(&list).map_err(|e| format!("FM: {e}"))?;
+            fm::apply(&now.fm, &list).map_err(|e| format!("FM: {e}"))?
+        }
+        None => now.fm.clone(),
+    };
+    Ok(RadioData { channels: new_channels, vfo: new_vfo, settings: new_settings, fm: new_fm })
 }
 
 pub fn write_changes(link: &mut dyn Link, now: &RadioData, wanted: &RadioData, dir: &Path) -> Res<String> {
@@ -175,6 +198,10 @@ pub fn write_changes(link: &mut dyn Link, now: &RadioData, wanted: &RadioData, d
     if wanted.settings != now.settings {
         settings::write_to_radio(link, &now.settings, &wanted.settings, dir)?;
         done.push("ajustes");
+    }
+    if wanted.fm != now.fm {
+        fm::write_to_radio(link, &now.fm, &wanted.fm, dir)?;
+        done.push("emisoras de FM");
     }
     Ok(if done.is_empty() {
         "El radio ya tenía ese perfil.".to_string()
@@ -201,7 +228,9 @@ mod tests {
         s[60] = 1; // Password on.
         s[61..64].copy_from_slice(&[0x12, 0x34, 0x56]);
         s[64..68].copy_from_slice(b"HOLA");
-        RadioData { channels: c, vfo: v, settings: s }
+        let mut f = vec![0u8; settings::BLOCK_SIZE];
+        f[2..4].copy_from_slice(&889u16.to_le_bytes());
+        RadioData { channels: c, vfo: v, settings: s, fm: f }
     }
 
     #[test]
@@ -209,6 +238,7 @@ mod tests {
         assert_eq!(classify("Baofeng_K6_canales_1.bin", channels::CHANNEL_AREA).unwrap(), Kind::Channels);
         assert_eq!(classify("Baofeng_K6_ajustes_1.bin", settings::SETTINGS_SIZE).unwrap(), Kind::Settings);
         assert_eq!(classify("Baofeng_K6_vfo_1.bin", settings::BLOCK_SIZE).unwrap(), Kind::Vfo);
+        assert_eq!(classify("Baofeng_K6_fm_1.bin", settings::BLOCK_SIZE).unwrap(), Kind::Fm);
         assert_eq!(classify("Baofeng_K6_logo_1.bin", SECTOR).unwrap(), Kind::Logo);
         assert_eq!(classify("Baofeng_K6_flash_backup.bin", FLASH_SIZE).unwrap(), Kind::FullFlash);
         // A firmware file, say, is neither the right size nor the right name.
@@ -225,6 +255,21 @@ mod tests {
         assert_eq!(wanted.channels, now.channels);
         assert_eq!(wanted.vfo, now.vfo);
         assert_eq!(wanted.settings, now.settings);
+        assert_eq!(wanted.fm, now.fm);
+    }
+
+    #[test]
+    fn a_profile_carries_the_stations_and_old_profiles_leave_them_alone() {
+        let source = radio();
+        let text = to_profile(&source);
+        let mut other = radio();
+        other.fm[2..4].copy_from_slice(&965u16.to_le_bytes());
+        assert_eq!(fm::parse(&plan_profile(&text, &other).unwrap().fm), [889]);
+
+        let old = &text[..text.find("[fm]").unwrap()];
+        assert_eq!(plan_profile(old, &other).unwrap().fm, other.fm);
+        let bad = format!("{old}[fm]\r\n1,50\r\n");
+        assert!(plan_profile(&bad, &other).is_err());
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! that flash directly. In programming mode the addresses 0x9000 and 0x9040 stand for the
 //! settings in RAM and the power-on text, and writing 0x9040 makes the radio save both the way
 //! its own menu does: see ProgromWriteReadData in src/CPS/ProgromFlash.c. 0x8000 does the same for
-//! the VFO records. Every other address in that mode goes straight to flash, so nothing else may
+//! the VFO records, and 0xC000 for the FM stations. Every other address in that mode goes straight to flash, so nothing else may
 //! ever be sent from here.
 
 use crate::{emit, ensure_backup_dir, open_link, pause, read_exact, utc_stamp, Link, Msg, Res, MS_REPLY, MS_WAIT_BOOT};
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const BLOCK_SIZE: usize = 64;
 pub(crate) const ADDR_VFO: u16 = 0x8000; // Saved by Flash_SaveVfoData.
+pub(crate) const ADDR_FM: u16 = 0xC000; // Saved by Flash_SaveFmData.
 pub const SETTINGS_SIZE: usize = 2 * BLOCK_SIZE;
 const ADDR_SETTINGS: u16 = 0x9000; // STR_RADIOINFORM in src/Common/PublType.h.
 const ADDR_POWER_TEXT: u16 = 0x9040; // Writing this one is what saves everything.
@@ -400,7 +401,7 @@ pub(crate) fn read_block(link: &mut dyn Link, addr: u16) -> Res<Vec<u8>> {
 
 pub(crate) fn write_block(link: &mut dyn Link, addr: u16, data: &[u8]) -> Res<()> {
     // Other addresses are raw flash in this mode, and a sector start would even be erased.
-    if ![ADDR_SETTINGS, ADDR_POWER_TEXT, ADDR_VFO].contains(&addr) || data.len() != BLOCK_SIZE {
+    if ![ADDR_SETTINGS, ADDR_POWER_TEXT, ADDR_VFO, ADDR_FM].contains(&addr) || data.len() != BLOCK_SIZE {
         return Err(format!("Escritura rechazada en 0x{addr:04X}: no es una zona de ajustes"));
     }
     let [hi, lo] = addr.to_be_bytes();

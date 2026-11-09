@@ -26,6 +26,7 @@ pub enum Msg {
     SettingsRead(Vec<u8>),
     LogoRead(Vec<u8>),
     VfoRead(Vec<u8>),
+    FmRead(Vec<u8>),
     Finished(Result<String, String>),
 }
 
@@ -47,6 +48,7 @@ macro_rules! say {
 }
 
 mod channels;
+mod fm;
 mod gui;
 mod logo;
 mod restore;
@@ -668,6 +670,8 @@ pub enum Action {
     Restore(PathBuf),
     ExportProfile(PathBuf),
     ImportProfile(PathBuf),
+    ReadFm,
+    WriteFm { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadVfo,
     WriteVfo { loaded: Vec<u8>, wanted: Vec<u8> },
     ReadLogo,
@@ -774,6 +778,25 @@ Copia de los canales anteriores en:
             let now = restore::read_all(&mut link)?;
             let wanted = restore::plan_profile(&text, &now)?;
             restore::write_changes(&mut link, &now, &wanted, &dir)
+        }
+        Action::ReadFm => {
+            say_waiting();
+            let data = fm::read_from_radio(&mut link)?;
+            let found = fm::parse(&data).len();
+            fm::publish_read(data);
+            Ok(format!("{found} emisoras leídas."))
+        }
+        Action::WriteFm { loaded, wanted } => {
+            say_waiting();
+            let (check, path) = fm::write_to_radio(&mut link, &loaded, &wanted, &dir)?;
+            fm::publish_read(check);
+            Ok(format!(
+                "Emisoras guardadas y comprobadas tras reiniciar el radio.
+
+Copia de las anteriores en:
+{}",
+                path.display()
+            ))
         }
         Action::ReadVfo => {
             say_waiting();

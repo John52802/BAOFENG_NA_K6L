@@ -2,7 +2,7 @@
 //! thread and reports through `crate::Msg`; a timer in the window collects those messages.
 
 use crate::channels::{self, Channel};
-use crate::{logo, restore, settings, theme, vfo};
+use crate::{fm, logo, restore, settings, theme, vfo};
 use crate::{list_ports, run_action, set_sink, Action, Language, Msg};
 use native_windows_gui as nwg;
 use std::cell::{Cell, RefCell};
@@ -136,6 +136,17 @@ struct Ui {
     vfo_hint: nwg::Label,
     vfo_data: RefCell<Option<Vec<u8>>>,
 
+    tab_fm: nwg::Tab,
+    fm_text: nwg::TextBox,
+    fm_read: nwg::Button,
+    fm_save: nwg::Button,
+    fm_import: nwg::Button,
+    fm_export: nwg::Button,
+    fm_hint: nwg::Label,
+    fm_open: nwg::FileDialog,
+    fm_saveas: nwg::FileDialog,
+    fm_data: RefCell<Option<Vec<u8>>>,
+
     tab_logo: nwg::Tab,
     logo_frame: nwg::ImageFrame,
     logo_bitmap: RefCell<nwg::Bitmap>,
@@ -230,6 +241,12 @@ impl Ui {
         self.restore.set_enabled(has_port);
         self.profile_export.set_enabled(has_port);
         self.profile_import.set_enabled(has_port);
+        let has_fm = self.fm_data.borrow().is_some();
+        self.fm_text.set_enabled(idle && has_fm);
+        self.fm_read.set_enabled(has_port);
+        self.fm_save.set_enabled(has_port && has_fm);
+        self.fm_import.set_enabled(idle && has_fm);
+        self.fm_export.set_enabled(idle && has_fm);
         let has_vfo = self.vfo_data.borrow().is_some();
         self.vfo_read.set_enabled(has_port);
         self.vfo_save.set_enabled(has_port && has_vfo);
@@ -307,6 +324,7 @@ impl Ui {
         let mut settings_read = None;
         let mut logo_read = None;
         let mut vfo_read = None;
+        let mut fm_read = None;
         if let Some(rx) = self.rx_msgs.borrow().as_ref() {
             for m in rx.try_iter() {
                 match m {
@@ -319,6 +337,7 @@ impl Ui {
                     Msg::SettingsRead(data) => settings_read = Some(data),
                     Msg::LogoRead(data) => logo_read = Some(data),
                     Msg::VfoRead(data) => vfo_read = Some(data),
+                    Msg::FmRead(data) => fm_read = Some(data),
                     Msg::Finished(r) => finished = Some(r),
                 }
             }
@@ -337,6 +356,10 @@ impl Ui {
             self.password_text.set_text(&settings::password(&data));
             self.scan_text.set_text(&settings::scan_range(&data));
             *self.settings_data.borrow_mut() = Some(data);
+        }
+        if let Some(data) = fm_read {
+            self.fm_text.set_text(&fm::to_text(&fm::parse(&data)));
+            *self.fm_data.borrow_mut() = Some(data);
         }
         if let Some(data) = vfo_read {
             self.show_vfos(&vfo::parse(&data));
@@ -561,6 +584,72 @@ impl Ui {
         }
     }
 
+    fn on_save_fm(&self) {
+        let Some(loaded) = self.fm_data.borrow().clone() else { return };
+        let wanted = fm::parse_list(&self.fm_text.text()).and_then(|list| fm::apply(&loaded, &list));
+        let wanted = match wanted {
+            Ok(w) => w,
+            Err(e) => {
+                self.message(&e, nwg::MessageIcons::Warning);
+                return;
+            }
+        };
+        if wanted == loaded {
+            self.message("No hay cambios que guardar.", nwg::MessageIcons::Info);
+            return;
+        }
+        let ok = self.confirm(
+            "Guardar emisoras",
+            "Reemplazará la lista de emisoras de FM del radio. Antes se guardará una copia,\n\
+             y el radio se reiniciará dos veces para comprobar que la conservó.\n\n\
+             No desconectes el cable ni apagues el radio durante el proceso.",
+        );
+        if ok {
+            *self.fm_data.borrow_mut() = None; // The check after saving fills it again.
+            self.start(Action::WriteFm { loaded, wanted });
+        }
+    }
+
+    fn on_import_fm(&self) {
+        if !self.fm_open.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.fm_open.get_selected_item() else { return };
+        let result = fs::read(&file)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map_err(|e| format!("No se pudo leer el archivo: {e}"))
+            .and_then(|text| fm::parse_list(&text));
+        match result {
+            Ok(list) => {
+                self.fm_text.set_text(&fm::to_text(&list));
+                self.status.set_text(&format!("{} emisoras importadas. Pendiente: \"Guardar en radio\".", list.len()));
+            }
+            Err(e) => self.message(&e, nwg::MessageIcons::Error),
+        }
+    }
+
+    fn on_export_fm(&self) {
+        let list = match fm::parse_list(&self.fm_text.text()) {
+            Ok(list) => list,
+            Err(e) => {
+                self.message(&e, nwg::MessageIcons::Warning);
+                return;
+            }
+        };
+        if !self.fm_saveas.run(Some(&self.window)) {
+            return;
+        }
+        let Ok(file) = self.fm_saveas.get_selected_item() else { return };
+        let mut path = PathBuf::from(file);
+        if path.extension().is_none() {
+            path.set_extension("csv");
+        }
+        match fs::write(&path, fm::to_csv(&list)) {
+            Ok(()) => self.status.set_text(&format!("Exportado: {}", path.display())),
+            Err(e) => self.message(&format!("No se pudo guardar: {e}"), nwg::MessageIcons::Error),
+        }
+    }
+
     fn on_save_vfos(&self) {
         let Some(loaded) = self.vfo_data.borrow().clone() else { return };
         let wanted = self.edited_vfos(&loaded).and_then(|list| vfo::apply(&loaded, &list));
@@ -606,6 +695,7 @@ impl Ui {
             restore::Kind::Channels => "Reemplazará todos los canales del radio por los de la copia.",
             restore::Kind::Settings => "Reemplazará los ajustes del radio por los de la copia, incluidos la clave de encendido y el mensaje.",
             restore::Kind::Vfo => "Reemplazará los VFO A y B por los de la copia.",
+            restore::Kind::Fm => "Reemplazará las emisoras de FM por las de la copia.",
             restore::Kind::Logo => "Reemplazará el logo por el de la copia.",
             restore::Kind::FullFlash => "De una copia completa solo se usan los canales y el logo: reemplazará los del radio. La calibración y los ajustes no se tocan.",
         };
@@ -624,6 +714,7 @@ impl Ui {
         *self.area.borrow_mut() = None;
         *self.settings_data.borrow_mut() = None;
         *self.vfo_data.borrow_mut() = None;
+        *self.fm_data.borrow_mut() = None;
         *self.logo_loaded.borrow_mut() = None;
         self.channels.borrow_mut().clear();
         self.fill_list();
@@ -648,7 +739,7 @@ impl Ui {
         let Ok(file) = self.profile_open.get_selected_item() else { return };
         let ok = self.confirm(
             "Aplicar perfil",
-            "Reemplazará los canales, los VFO y los ajustes del radio por los del perfil. La clave de encendido no cambia.\n\n\
+            "Reemplazará los canales, los VFO, los ajustes y las emisoras de FM del radio por los del perfil. La clave de encendido no cambia.\n\n\
              Se comprueba todo el archivo antes de escribir, y se guarda antes una copia de lo actual.\n\
              No desconectes el cable ni apagues el radio: puede reiniciarse varias veces.",
         );
@@ -914,6 +1005,10 @@ impl Ui {
         self.settings_export.set_position(380, buttons_y);
         self.settings_help.set_position(498, buttons_y);
 
+        // FM: the list takes the extra height.
+        self.fm_text.set_size(220, (th - 24) as u32);
+        self.fm_hint.set_size((tw - 280) as u32, 120);
+
         // Logo: the preview grows in whole steps, so the dots stay even.
         let scale = (((tw - 412) / logo::WIDTH as i32).min((th - 100) / logo::HEIGHT as i32)).max(2) as usize;
         let (pw, ph) = ((logo::WIDTH * scale) as i32, (logo::HEIGHT * scale) as i32);
@@ -1156,6 +1251,7 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::Tab::builder().text("Canales").parent(&ui.tabs).build(&mut ui.tab_channels)?;
     nwg::Tab::builder().text("Ajustes").parent(&ui.tabs).build(&mut ui.tab_settings)?;
     nwg::Tab::builder().text("VFO").parent(&ui.tabs).build(&mut ui.tab_vfo)?;
+    nwg::Tab::builder().text("FM").parent(&ui.tabs).build(&mut ui.tab_fm)?;
     nwg::Tab::builder().text("Logo").parent(&ui.tabs).build(&mut ui.tab_logo)?;
 
     let t = &ui.tab_radio;
@@ -1332,6 +1428,25 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .parent(t)
         .build(&mut ui.vfo_hint)?;
 
+    let t = &ui.tab_fm;
+    nwg::TextBox::builder()
+        .position((12, 12))
+        .size((220, 280))
+        .flags(nwg::TextBoxFlags::VISIBLE | nwg::TextBoxFlags::VSCROLL | nwg::TextBoxFlags::AUTOVSCROLL | nwg::TextBoxFlags::TAB_STOP)
+        .parent(t)
+        .build(&mut ui.fm_text)?;
+    nwg::Button::builder().text("Leer del radio").position((250, 12)).size((180, 32)).parent(t).build(&mut ui.fm_read)?;
+    nwg::Button::builder().text("Guardar en radio").position((250, 52)).size((180, 32)).parent(t).build(&mut ui.fm_save)?;
+    nwg::Button::builder().text("Importar lista...").position((440, 12)).size((180, 32)).parent(t).build(&mut ui.fm_import)?;
+    nwg::Button::builder().text("Exportar CSV...").position((440, 52)).size((180, 32)).parent(t).build(&mut ui.fm_export)?;
+    nwg::Label::builder()
+        .text("Una emisora por línea, como 88.9, entre 65.0 y 108.0 MHz. Hasta 30, en el orden en que quieras recorrerlas.\r\n\r\nEl radio solo guarda las frecuencias, sin nombres.\r\n\r\nEn la radio FM, se usan en su modo de canales.")
+        .position((250, 100))
+        .size((470, 120))
+        .background_color(Some([255, 255, 255]))
+        .parent(t)
+        .build(&mut ui.fm_hint)?;
+
     let t = &ui.tab_logo;
     nwg::ImageFrame::builder().position((12, 12)).size((256, 128)).parent(t).build(&mut ui.logo_frame)?;
     let x = 288;
@@ -1399,6 +1514,16 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .filters("Imágenes (*.png;*.jpg;*.jpeg;*.bmp;*.gif)|Todos (*.*)")
         .build(&mut ui.logo_open)?;
     nwg::FileDialog::builder()
+        .title("Importar emisoras de FM")
+        .action(nwg::FileDialogAction::Open)
+        .filters("Listas (*.csv;*.txt)|Todos (*.*)")
+        .build(&mut ui.fm_open)?;
+    nwg::FileDialog::builder()
+        .title("Exportar emisoras de FM")
+        .action(nwg::FileDialogAction::Save)
+        .filters("CSV (*.csv)")
+        .build(&mut ui.fm_saveas)?;
+    nwg::FileDialog::builder()
         .title("Importar VFO")
         .action(nwg::FileDialogAction::Open)
         .filters("CSV (*.csv)|Todos (*.*)")
@@ -1443,7 +1568,7 @@ pub fn run() {
         return;
     }
     let ui = Rc::new(ui);
-    let pages = [ui.tab_radio.handle, ui.tab_channels.handle, ui.tab_settings.handle, ui.tab_vfo.handle, ui.tab_logo.handle];
+    let pages = [ui.tab_radio.handle, ui.tab_channels.handle, ui.tab_settings.handle, ui.tab_vfo.handle, ui.tab_fm.handle, ui.tab_logo.handle];
     theme::install(&ui.window, &ui.tabs, &pages);
     theme::apply(&ui.window, theme::saved_dark(), false);
     ui.layout();
@@ -1517,6 +1642,14 @@ pub fn run() {
                     ui.on_export_profile();
                 } else if handle == ui.profile_import.handle {
                     ui.on_import_profile();
+                } else if handle == ui.fm_read.handle {
+                    ui.start(Action::ReadFm);
+                } else if handle == ui.fm_save.handle {
+                    ui.on_save_fm();
+                } else if handle == ui.fm_import.handle {
+                    ui.on_import_fm();
+                } else if handle == ui.fm_export.handle {
+                    ui.on_export_fm();
                 } else if handle == ui.vfo_read.handle {
                     ui.start(Action::ReadVfo);
                 } else if handle == ui.vfo_save.handle {
