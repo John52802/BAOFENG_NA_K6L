@@ -1,0 +1,17 @@
+[package]
+name = "k6_actualizar"
+version = "0.1.0"
+edition = "2021"
+description = "Installs the rx-spectrum firmware and Spanish voices on a Baofeng UV-K6 family radio"
+
+[dependencies]
+serialport = { version = "4", default-features = false }
+native-windows-gui = { version = "1.0", features = ["all"] }
+
+[build-dependencies]
+embed-manifest = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -128,7 +128,7 @@ extern Boolean KEY_GetKeyEvent(void)
         if(KeyPressCount == 100) 
         {//支持长按键
             if(PressedKey == KEYID_UP || PressedKey == KEYID_DOWN  || PressedKey == KEYID_VM || PressedKey == KEYID_BAND
-               || PressedKey == KEYID_STAR || PressedKey == KEYID_WELL  || PressedKey == KEYID_0 || PressedKey == KEYID_8
+               || PressedKey == KEYID_STAR || PressedKey == KEYID_WELL  || PressedKey == KEYID_0 || PressedKey == KEYID_1 || PressedKey == KEYID_2 || PressedKey == KEYID_8
                || PressedKey == KEYID_EXIT || PressedKey == KEYID_SIDEKEY1 || PressedKey == KEYID_SIDEKEY2)
             {
                 g_keyScan.keyEvent = PressedKey;
@@ -225,6 +225,12 @@ extern U8 Key_GetRealEvent(void)
             case KEYID_0:
                 keyEvent = KEYID_WX;
                 break;     
+            case KEYID_1:
+                keyEvent = KEYID_SPECTRUM;
+                break;
+            case KEYID_2:
+                keyEvent = KEYID_AM_SW;
+                break;
             case KEYID_8:
                 keyEvent = KEYID_PWRSW;
                 break;     

@@ -55,28 +55,9 @@ Boolean CheckFreqInRange(U32 freq)
     
     tempFreq = freq / 10000;
     
-    if((tempFreq >= 1080) && (tempFreq < 1360))
+    // Receive coverage only. TX is gated separately by CheckFreqInTxFreqRange.
+    if((tempFreq >= RX_MIN_100KHZ) && (tempFreq < RX_MAX_100KHZ))
     {
-        if(g_rfMoudel.amRxEn == 0)
-        {//不允许航空接收
-            return FALSE;
-        }
-        return TRUE;
-    }
-    else if((tempFreq >= bandRang.bandFreq.vhf2L) && (tempFreq < bandRang.bandFreq.vhf2H))
-    { 
-        return TRUE;
-    }
-    else if((tempFreq >= bandRang.bandFreq.B350ML) && (tempFreq < bandRang.bandFreq.B350MH))
-    { 
-        return TRUE;
-    }
-    else if((tempFreq >= bandRang.bandFreq.vhfL) && (tempFreq < bandRang.bandFreq.vhfH))
-    { 
-        return TRUE;
-    }
-    else if((tempFreq >= bandRang.bandFreq.uhfL) && (tempFreq < bandRang.bandFreq.uhfH))
-    { 
         return TRUE;
     }
 
@@ -350,7 +331,8 @@ extern void CalculateVfoTxFreq(void)
     }
 }
 
-extern void VfoFreqSave(void)
+/* Updates the VFO data in RAM only, so a scan does not write flash on every step. */
+static void VfoFreqToBuf(void)
 {
     U8  *buf;
     U32 tempFreq;
@@ -366,7 +348,11 @@ extern void VfoFreqSave(void)
     }
 
     VfoFrequency2Buf(tempFreq,buf,8);
-    
+}
+
+extern void VfoFreqSave(void)
+{
+    VfoFreqToBuf();
     Flash_SaveVfoData(g_ChannelVfoInfo.switchAB);
 }
 
@@ -374,7 +360,6 @@ extern void VfoFreqSave(void)
 extern void VfoFreqUp(U8  isScan)
 {
     U32 tempFreq;
-    U8  workBand;
     U32 lastFreq;
 
     //切换频率时需要先关闭倒频，才能切换会主状态
@@ -395,31 +380,26 @@ extern void VfoFreqUp(U8  isScan)
     }
     else
     {
-        if(g_rfMoudel.amRxEn == 1 && lastFreq < 1360)
+        // Continuous receive range, wraps from the top back to the bottom.
+        if(tempFreq >= RX_MAX_100KHZ)
         {
-            if(tempFreq >= 1360)
-            {//AM模式
-                g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency = 10800000;
-            }
-        }
-        else
-        {
-            //获取当前工作频段
-            workBand = GetCurWorkBand(lastFreq);
-    
-            if(tempFreq >= bandRang.bandbuf.freq[workBand*2+1]) 
-            {
-                g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency = bandRang.bandbuf.freq32[workBand*2];
-            }
+            g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency = RX_MIN_100KHZ * 10000UL;
         }
     }
 
     //计算发射频率
     CalculateVfoTxFreq();
 
-    VfoFreqSave();
+    if(isScan)
+    {
+        VfoFreqToBuf();
+    }
+    else
+    {
+        VfoFreqSave();
+    }
     RxReset();
-    
+
     //显示当前频率信息
     DisplayRadioHome();
 
@@ -430,7 +410,6 @@ extern void VfoFreqDown(U8  isScan)
 {
     U32 tempFreq;
     U32 lastFreq;
-    U8  workBand;
 
     //切换频率时需要先关闭倒频，才能切换会主状态
     Radio_ReverseOff();
@@ -449,31 +428,26 @@ extern void VfoFreqDown(U8  isScan)
     }
     else
     {
-        if((g_rfMoudel.amRxEn == 1) && (lastFreq < 1080 && lastFreq >= 1360))
+        // Continuous receive range, wraps from the bottom back to the top.
+        if(tempFreq < RX_MIN_100KHZ)
         {
-            if(tempFreq < 10800000)
-            {//AM模式
-                g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency = 13600000 - stepList[g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqStep];
-            }
-        }
-        else
-        {
-            //获取当前工作频段
-            workBand = GetCurWorkBand(lastFreq);
-    
-            if(tempFreq < bandRang.bandbuf.freq[workBand*2]) 
-            {
-                g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency = bandRang.bandbuf.freq32[workBand*2+1] - bandRang.bandbuf.freq32[workBand*2] + g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency;
-            }
+            g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqRx.frequency = RX_MAX_100KHZ * 10000UL - stepList[g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqStep];
         }
     }
 
     //计算发射频率
     CalculateVfoTxFreq();
-    
-    VfoFreqSave();
-    RxReset(); 
-    
+
+    if(isScan)
+    {
+        VfoFreqToBuf();
+    }
+    else
+    {
+        VfoFreqSave();
+    }
+    RxReset();
+
     //显示当前频率信息
     DisplayRadioHome();
 

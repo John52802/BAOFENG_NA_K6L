@@ -97,6 +97,7 @@ OBJS += src/Gui/DisplayPowerOn.o
 OBJS += src/Gui/DisplayScanQT.o
 OBJS += src/Gui/DisplaySearch.o
 OBJS += src/Gui/DisplayWeather.o
+OBJS += src/Gui/Lang_ES.o
 OBJS += src/Gui/LcdFillDot.o
 
 # Interface
@@ -121,6 +122,7 @@ OBJS += src/App/AppMoni.o
 OBJS += src/App/AppScan.o
 OBJS += src/App/AppScanQT.o
 OBJS += src/App/AppSearch.o
+OBJS += src/App/AppSpectrum.o
 OBJS += src/App/AppStopWatch.o
 OBJS += src/App/AppTask.o
 OBJS += src/App/AppWeather.o

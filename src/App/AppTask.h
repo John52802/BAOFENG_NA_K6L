@@ -14,7 +14,8 @@ enum WORKMODE_Type
     MODE_STOPWATCH,
     MODE_DTMF,
     MODE_PROGRAM,
-    MODE_FLASH_PROGRAM
+    MODE_FLASH_PROGRAM,
+    MODE_SPECTRUM
 };
 /***********************************************************************************************/    
 

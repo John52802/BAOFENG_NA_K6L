@@ -14,6 +14,10 @@
 #define PRO_CMD_EARSE            0x04
 #define PRO_CMD_END              0x06      //重启命令
 #define PRO_CMD_WRITE            0x57
+#define PRO_CMD_READ             0x52      // Request: addr (4, little endian) + length (2, big endian)
+
+#define FLASH_READ_MAX_LEN       1024
+#define FLASH_TOTAL_SIZE         0x200000UL // XM25QH16C, 16 Mbit
 
 #define PRO_CMD_ERROR            0xEE
 

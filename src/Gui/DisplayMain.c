@@ -215,7 +215,7 @@ extern void DisplayUpdateChFlag(U8 disAB)
     }
 				
     /*ÏÔÊ¾AM±êÖ¾*/
-    if(g_ChannelVfoInfo.chVfoInfo[disAB].rx->frequency >= 10800000 && g_ChannelVfoInfo.chVfoInfo[disAB].rx->frequency < 13600000 )
+    if(Rfic_IsAmRx(g_ChannelVfoInfo.chVfoInfo[disAB].rx->frequency) && g_rfState != RF_TX)
     {
         LCD_ClearArea(posY,85,ICON_QT_SIZEX,ICON_QT_SIZEY);
         LCD_DisplayPicture(posY,85,ICON_AM_SIZEX,ICON_AM_SIZEY,iconAM,LCD_DIS_NORMAL);

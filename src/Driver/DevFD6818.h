@@ -134,6 +134,8 @@ extern void  Rfic_TxSingleTone_On(U8  txOn);
 extern void Rfic_TxSingleTone_Off(void);
 
 extern void Rfic_SwitchFM_AM(U8 mode);
+extern U8 g_amForced;
+extern Boolean Rfic_IsAmRx(U32 freq);
 
 /*****************************************************************/
 /*                            F S K                              */

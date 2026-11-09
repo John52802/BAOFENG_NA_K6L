@@ -230,7 +230,8 @@ const String *ChDisEnStr[] =
 const String *LanStr[] = 
 {
     "ENGLISH",
-    "中文"
+    "中文",
+    "Espa\205ol"
 };
 
 const String *DtmfSetSelCnStr[] = 
@@ -405,7 +406,7 @@ extern void Menu_GetSubItemString(U8 menuIndex)
                 }
                 break;
             case 1:
-                sprintf(disBuf,"%s",FMBandItemStr[g_menuInfo.selectedItem]); 
+                sprintf(disBuf,"%s",(g_menuInfo.selectedItem < 2) ? FMBandItemStr[g_menuInfo.selectedItem] : "--"); 
             default:
                 break;
         }

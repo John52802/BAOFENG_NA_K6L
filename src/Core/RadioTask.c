@@ -146,8 +146,10 @@ extern void Radio_EnterTxMode(void)
     ExitAllFunction(0);
     if(g_sysRunPara.sysRunMode == MODE_SCAN)
     {
-        if(g_scanInfo.state != WAIT_RECALL)   
+        if(g_scanInfo.state != WAIT_RECALL)
         {
+            // Keep the scanned VFO frequency: the reload below must not bring back an old one.
+            Flash_SaveVfoData(g_ChannelVfoInfo.switchAB);
             ChannelNumChangeRead(0,1);
             g_scanInfo.state = SCAN_IDLE;
             g_scanInfo.scanTime = 0;
@@ -162,7 +164,9 @@ extern void Radio_EnterTxMode(void)
 
     DualStandbyWorkOFF();
 
-    txFlag = CheckFreqInTxFreqRange(g_CurrentVfo->freqTx.frequency);
+    // Check the frequency actually used for TX: reverse mode points tx at freqRx,
+    // which can now hold receive-only frequencies such as the air band.
+    txFlag = CheckFreqInTxFreqRange(g_CurrentVfo->tx->frequency);
 
     if((g_CurrentVfo->busyLock && g_sysRunPara.rfRxFlag.rxReceiveOn == ON) || g_radioInform.txForbid)
 	{//遇忙禁发

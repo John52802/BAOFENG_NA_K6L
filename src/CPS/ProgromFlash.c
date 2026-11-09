@@ -460,6 +460,40 @@ U8 CheckRxDataOk(void)
     
     return OK;
 }
+/* Read-only flash dump. Replies from rxBuf because txBuf only holds 64 bytes. */
+void HandleFlashRead(void)
+{
+    U8 *buf = progrom.rxBuf;
+    U32 addr;
+    U16 len,crc;
+
+    if(flashProgrom.length != 6)
+    {
+        StatusAck(PRO_CMD_ERROR, ERROR_CODE_DATA);
+        return;
+    }
+
+    memcpy((U8 *)&addr,&buf[FLASH_PRO_DATA_ADDR],4);
+    len = (buf[FLASH_PRO_DATA_ADDR+4]<<8) + buf[FLASH_PRO_DATA_ADDR+5];
+
+    if(len == 0 || len > FLASH_READ_MAX_LEN || addr >= FLASH_TOTAL_SIZE || len > (FLASH_TOTAL_SIZE - addr))
+    {
+        StatusAck(PRO_CMD_ERROR, ERROR_CODE_ADDR);
+        return;
+    }
+
+    buf[FLASH_PRO_LEN_ADDR]   = len>>8;
+    buf[FLASH_PRO_LEN_ADDR+1] = len;
+    SpiFlash_ReadBytes(addr,&buf[FLASH_PRO_DATA_ADDR],len);
+
+    crc = CRC_ValidationCalc(&buf[FLASH_PRO_CMD_ADDR], len + 5);
+    buf[FLASH_PRO_DATA_ADDR + len]     = crc>>8;
+    buf[FLASH_PRO_DATA_ADDR + len + 1] = crc;
+
+    UartSendBuf(buf, FLASH_PRO_DATA_ADDR + len + 2);
+    progrom.timeOut = 0;
+}
+
 void HandleProgromCmd(void)
 {
     U8 temp;
@@ -470,6 +504,9 @@ void HandleProgromCmd(void)
     flashProgrom.txLength = 4;
     switch(flashProgrom.cmd)
     {
+        case PRO_CMD_READ:
+            HandleFlashRead();
+            return;
         case PRO_CMD_ADDR:
             memcpy((U8 *)&flashProgrom.StartAddr,&progrom.rxBuf[FLASH_PRO_DATA_ADDR],4);
             flashProgrom.packageNum = 0;

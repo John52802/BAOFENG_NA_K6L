@@ -31,11 +31,17 @@ extern void ResumeFmMode(void)
 {
     if(g_radioInform.fmEnale || g_rfRxState == WAIT_RXEND)
     {//收音机功能禁用
+        // Called when leaving the FM menu: refusing here would trap the user in it.
+        if(g_sysRunPara.sysRunMode == MODE_MENU)
+        {
+            fmInfo.mode = FM_READY;
+            Menu_ExitMode();
+        }
         BeepOut(BEEP_ERROR);
         return;
-    }    
+    }
     //进入收音机时关闭双守
-    DualStandbyWorkOFF();    
+    DualStandbyWorkOFF();
     ResetInputBuf();
 
     g_sysRunPara.sysRunMode = MODE_FM;

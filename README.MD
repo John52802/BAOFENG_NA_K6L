@@ -1,65 +1,55 @@
-# SOURCE CODE FOR BAOFENG UV-K6x Radios-CNT7 UPLOAD
-## Introduction
+# BAOFENG NA-K6: firmware modificado
 
-This repository contains the firmware source code for the Baofeng UV-K6x series of radios. The code is written in C and is intended to be compiled with the GCC compiler. The code is released under the BFPL-1.0 license.
+Versión no oficial del firmware para radios Baofeng NA-K6. Probada solo en radios NA-K6 con chip de radio FD6818. Baofeng no la respalda.
 
-## Development Environment
+## Repositorio base
 
-### 1. Install Visual Studio Code
-First, you need to install Visual Studio Code (VS Code). You can download and install it from the [Visual Studio Code official website](https://code.visualstudio.com/).
+Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/BAOFENG-UV-K6-Firmware)**.
 
-### 2. Install PlatformIO IDE Extension
-The code is intended to be compiled with the PlatformIO IDE extension for VS Code. To install the PlatformIO IDE extension, follow these steps:
-1. Open VS Code.
-2. Click on the Extensions icon in the left sidebar.
-3. Search for "PlatformIO IDE" in the Extensions Marketplace.
-4. Click the "Install" button to install the PlatformIO IDE extension.
+## ⚠️ Antes de instalar
 
-### 3. Radio specific Platform Installation:
-Click "PlatformIO Core CLI" from VSCode PlatformIO Panel -> Quick Access -> Miscellaneous.
-Enter below install commands:
+- **Solo para NA-K6 (procesador KD32F328) con chip de radio FD6818.** Con el chip FD6818B la parte de radio deja de funcionar. Para saber cuál lleva el tuyo hay que abrir el radio y leer el chip. No sirve para radios Quansheng.
+- **No se puede volver atrás.** Baofeng no publica el firmware de fábrica, y no se puede leer del radio. Instalas esto bajo tu propio riesgo.
+- **Respeta la normativa de radio.** Este firmware mantiene los rangos de transmisión del original, que son muy amplios (hasta 600 MHz). Transmite solo en las frecuencias que tengas autorizadas. El firmware bloquea la transmisión en banda aérea.
+- **Haz una copia de tu radio** antes de modificar sus voces o canales. Cada radio tiene su propia calibración: no restaures la copia de un radio en otro.
+
+## Qué añade
+
+- Recepción de 100 a 999,999 MHz, con banda aérea en AM. Por encima de 600 MHz puede no recibirse nada: el hardware no está pensado para eso.
+- AM opcional en cualquier frecuencia (mantener `2`).
+- Textos en español: `MENU` > `Language` > `Español`.
+- Voces en español en una zona libre de la memoria flash, sin borrar las de fábrica. Este repositorio no incluye los audios.
+- Vista aproximada de espectro (mantener `1` o pulsar `BAND`). Indica actividad, no una frecuencia exacta: el error medido fue de unos 275 kHz en el ancho de 2 MHz y de unos 3 MHz en el de 10 MHz.
+- El silenciador se respeta por debajo de 130 MHz, y el escaneo por frecuencia ya no graba en la flash a cada paso.
+
+## Fallos corregidos del firmware base
+
+- Quedarse transmitiendo sin parar al enviar tonos DTMF.
+- Cuelgue en el menú `FM BAND` en modo canal, y quedar atrapado en el menú FM mientras se recibe.
+- Desplazamientos del menú guardados multiplicados por 10, que hacían transmitir en otra frecuencia.
+- Transmisión en frecuencias no permitidas usando la inversión.
+
+## Compilar el firmware
+
+Hace falta ARM GCC (`arm-none-eabi-gcc`). La lista de archivos y las opciones de compilación están en el `Makefile`, y el mapa de memoria en `kd32f328xb.ld`. Este repositorio no incluye el firmware ya compilado.
+
+## Instalar el firmware
+
+Con el cable de programación conectado, enciende el radio con los 2 botones laterales naranjas pulsados para entrar en modo `UPDATE`. Después carga el archivo `.bin` con `BFK6_Bootloader.exe` o con el programa para Windows de este repositorio.
+
+## Programa para Windows
+
+`tools/k6-actualizar` es un programa en Rust para sacar copias de la memoria flash, instalar firmware, cambiar voces y editar canales. Solo escribe en las zonas de voces y canales de la memoria flash externa, y nunca borra el chip completo.
+
 ```
-pio pkg install -g -p https://github.com/cnt7/BAOFENG-UV-K6-Firmware
+cd tools/k6-actualizar
+cargo build --release
 ```
 
-When you are using Linux, you need to install the udev rules for OpenOCD
-Copy the 60-openocd.rules file under tool-openocd-kd32 package to /etc/udev/rules.d/ directory.
-```
-sudo cp ~/.platformio/packages/tool-openocd-kd32/contrib/60-openocd.rules  /etc/udev/rules.d/
-```
-Refresh the udev rules.
-```
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
+Si existen `out/bf_uvk6-rx-spectrum.bin` y `out/voces_es_gonzalo/voces_es.bin`, los incluye en el programa. Si no, elige el firmware desde un archivo `.bin`, y no ofrece las voces en español.
 
-## Building
+## Licencia
 
-To build the code, follow these steps:
-1. Open the project in Visual Studio Code.
-2. Click on the PlatformIO icon in the left sidebar.
-3. Click on the "Build" button to build the code.
-4. The code will be compiled, and the output binary file will put into ./out/ folder.
+Este trabajo deriva del código abierto de Baofeng y se distribuye bajo el acuerdo de [LICENSE](LICENSE) (BFPL-1.0): uso personal y no comercial, conservando el acuerdo y el aviso de copyright, y cumpliendo la normativa de radio.
 
-## Uploading
-
-To upload the code to the radio, you will need to use a programming cable. You can find programming cables for the Baofeng UV-K6x series of radios on eBay or Amazon. Once you have the programming cable, you can upload the code by running the BFK6_Bootloader.exe program on a Windows computer.
-
-To upload the code to the radio, follow these steps:
-1. Power off your UV-K6 radio.
-2. Connect the programming cable to the radio and the computer.
-3. Press and hold 2 ORANGE side buttons on the radio, then turn on the radio, you will see the screen shows "UPDATE" and the radio will be in the update mode.
-4. Run the BFK6_Bootloader.exe program on your computer.
-5. Click the "..." button and select the output binary file from the ./out/ folder.
-6. Select the COM port that the programming cable is connected to.
-6. Click the large "按两个侧键开机进入升级(Power on with side buttons pressed to Enter Upgrade)" button to upload the code to the radio.
-
-## License
-
-The code is released under the BFPL-1.0 license. for more information, please see the LICENSE file.
-
-## Copyright
 Copyright © 2024 Baofeng. All rights reserved.
-
-## Contributors
-- BD4VOW ;  Starry Night Quintet- CNT7 DarkSoma OHMYTIME  X 
-    - provided gcc, openocd and PlatformIO support.

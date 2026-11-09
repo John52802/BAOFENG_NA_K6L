@@ -4,6 +4,10 @@
 extern const U8 MOD_LIST[10];
 
 extern void ListFlagSet(U8  *listbuf,U16 Data,U8  val);
+/* Receive range in 100 kHz units: what the 6-digit frequency entry can express. */
+#define RX_MIN_100KHZ  1000UL
+#define RX_MAX_100KHZ  10000UL
+
 extern void GetHardWorkBand(U16 freq);
 extern void RadioConfig_Init(void);
 extern Boolean CheckFreqInRange(U32 freq);

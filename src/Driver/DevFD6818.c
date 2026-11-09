@@ -48,6 +48,17 @@ static  U32  DCS_DATA;               // 二进制数据流
 static  U8   ctsDcsCodeType;
 
 static U8  RF_Baseband_Mode = ModeFM;        // Rfic工作模式
+U8 g_amForced = 0;                           // Receive AM on every frequency, cleared at power on
+
+/* Air band is always AM. Weather channels stay FM even when AM is forced. */
+Boolean Rfic_IsAmRx(U32 freq)
+{
+    if(freq >= 10800000 && freq < 13600000)
+    {
+        return TRUE;
+    }
+    return (g_amForced && g_sysRunPara.sysRunMode != MODE_WEATHER) ? TRUE : FALSE;
+}
 
 void CTCSSCaleSkipFreq(U16 hopping_code, U16 pre_code, U16 ctc)
 {
@@ -533,7 +544,8 @@ void Rfic_SetScramble(U8 group,U32 freq)
 
     temp = Rfic_ReadWord(0x31);
 
-    if(freq >= 10800000 && freq < 13600000)
+    // Rfic_ConfigTxMode selects FM first, so forced AM never reaches the TX setup.
+    if((freq >= 10800000 && freq < 13600000) || RF_Baseband_Mode == ModeAM)
     {
         Rfic_WriteWord(0X31, temp & (~BIT1));
 
@@ -951,10 +963,15 @@ void Rfic_SQLSetup()
     U16 FREQ_TEMP;
 
     UINT_BUFF = TH_SQL_TAB[g_radioInform.sqlLevel];
+    i = TH_SQL_TAB_MUTE[g_radioInform.sqlLevel];
     FREQ_TEMP = g_CurrentVfo->rx->frequency / 100000;
     if(g_CurrentVfo->rx->frequency >= 40000000)
     {
         index = (FREQ_TEMP - 400) / 10;
+        if(index > 15)
+        {
+            index = 15;
+        }
         if( TH_SQL_TAB[g_radioInform.sqlLevel] > OFFSET_SQL_U_400[index] )
         {
             UINT_BUFF = UINT_BUFF - OFFSET_SQL_U_400[index];
@@ -963,7 +980,11 @@ void Rfic_SQLSetup()
     }
     else if(g_CurrentVfo->rx->frequency >= 30000000)
     {
-        index = (FREQ_TEMP - 350) / 5;
+        index = (FREQ_TEMP < 350) ? 0 : (FREQ_TEMP - 350) / 5;
+        if(index > 15)
+        {
+            index = 15;
+        }
         if( TH_SQL_TAB[g_radioInform.sqlLevel] > OFFSET_SQL_U_350[index] )
         {
             UINT_BUFF = UINT_BUFF - OFFSET_SQL_U_350[index];
@@ -989,6 +1010,10 @@ void Rfic_SQLSetup()
         if(g_CurrentVfo->rx->frequency >= 20000000)
         {
             index = (FREQ_TEMP - 200) / 5;
+            if(index > 15)
+            {
+                index = 15;
+            }
             if( TH_SQL_TAB[g_radioInform.sqlLevel] > OFFSET_SQL_V_200[index] )
             {
                 UINT_BUFF = UINT_BUFF - OFFSET_SQL_V_200[index];
@@ -997,8 +1022,12 @@ void Rfic_SQLSetup()
         }
         else
         {//AM频段静躁采用V段 130M的补偿值
-            UINT_BUFF = TH_SQL_TAB[9] - OFFSET_SQL_V_136[0];
-            i = UINT_BUFF - 3;
+            // Follows the user's squelch level, with the 130 MHz V band correction.
+            if( TH_SQL_TAB[g_radioInform.sqlLevel] > OFFSET_SQL_V_136[0] )
+            {
+                UINT_BUFF = UINT_BUFF - OFFSET_SQL_V_136[0];
+                i = TH_SQL_TAB_MUTE[g_radioInform.sqlLevel] - OFFSET_SQL_V_136[0];
+            }
         }
     }
     UINT_BUFF = (UINT_BUFF << 8) | i;
@@ -1065,13 +1094,13 @@ void Rfic_SetAfout(U8  state)
 void Rfic_ConfigRxMode(void)
 {
     GetHardWorkBand(g_CurrentVfo->rx->frequency/10000);
-    if(g_CurrentVfo->rx->frequency >= 10800000 && g_CurrentVfo->rx->frequency < 13600000 )
+    if(Rfic_IsAmRx(g_CurrentVfo->rx->frequency))
     {
-        Rfic_SwitchFM_AM(ON);
+        Rfic_SwitchFM_AM(ModeAM);
     }
     else
     {
-        Rfic_SwitchFM_AM(OFF);
+        Rfic_SwitchFM_AM(ModeFM);
     }
     RF_PowerSet(g_ChannelVfoInfo.BandFlag,PWR_OFF);
     Rfic_WriteWord(0x37, REG_37 | 0x0F | BIT9);

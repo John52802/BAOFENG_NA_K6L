@@ -193,7 +193,7 @@ extern void Menu_GetSubItemPara(U8 menuIndex)
             g_menuInfo.selectedItem = g_radioInform.totLevel;
             break;
         case S_LAN:
-            g_menuInfo.subMaxItem = 2;
+            g_menuInfo.subMaxItem = 3;
             g_menuInfo.selectedItem = g_radioInform.language;
             break;
         case S_VOIC:
@@ -1195,7 +1195,8 @@ extern void Menu_SaveSelectItem(U8 menuIndex)
                 }
                 g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqOffset = (g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqOffset+ 20)/50*50;
 
-                OffectFrequency2Buf(g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqOffset,g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].Offset,7);
+                /* Stored in 100 Hz units: VfoOffsetCalculate multiplies by 10 when loading. */
+                OffectFrequency2Buf(g_ChannelVfoInfo.chVfoInfo[g_ChannelVfoInfo.switchAB].freqOffset / 10,g_ChannelVfoInfo.vfoInfo[g_ChannelVfoInfo.switchAB].Offset,7);
                 ChannleVfoDataInit(g_ChannelVfoInfo.switchAB,0);
             }
             break;

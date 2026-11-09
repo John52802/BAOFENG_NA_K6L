@@ -6,7 +6,9 @@ void LCD_DisplayText(U8 posY, U8 posX,  U8 *pString,U8 fontSize,U8 flagInvert)
 	U8 bufDat[64];
     U8 changeFlag = 0;
     U16 revBackFlag;
+    U8 langBuf[32];
 
+    pString = (U8 *)Lang_Translate(pString, langBuf, sizeof(langBuf));
     revBackFlag = flagInvert;
 
 	for( i = 0; ; )
@@ -51,7 +53,13 @@ void LCD_DisplayText(U8 posY, U8 posX,  U8 *pString,U8 fontSize,U8 flagInvert)
 	    }
 		else
 		{
-            if( pString[i] >= 0x20 && pString[i] <= 0x7E )
+            if( Lang_IsGlyph(pString[i]) )
+            {
+                Lang_Glyph(pString[i], fontSize, bufDat);
+                SC5260_DisplayArea( posY, posX, fontSize>>1, fontSize, bufDat, flagInvert);
+                posX += (fontSize>>1);
+            }
+            else if( pString[i] >= 0x20 && pString[i] <= 0x7E )
             {
                 if( fontSize == FONTSIZE_16x16)
                 {

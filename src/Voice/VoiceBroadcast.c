@@ -4,7 +4,39 @@ U8 FastChangeVoice = 0;
 STR_VOICE voice;
 STR_VOICE_ONFO g_voiceInform;
 static short s_valprev;
-static char s_index; 
+static char s_index;
+
+/*
+ * Spanish voices live in unused flash, leaving the factory voices untouched. They use
+ * the same 8 kHz 4-bit ADPCM with their own tables, so they do not depend on the
+ * bootloader's. Layout: index table (same format, relative to this base), then a magic
+ * value. Without the magic the radio keeps using the factory English voices.
+ */
+#define FLASH_VOICE_ES_ADDR    0x150000UL
+#define FLASH_VOICE_ES_MAGIC   0x10534541UL   // Written as "AES\x10" at offset 0x7F0
+#define vo_es_veinti           0x8A           // "veinti", as in veinticinco
+
+static const S8 esIndexTab[16] = {-1,-1,-1,-1,2,4,6,8,-1,-1,-1,-1,2,4,6,8};
+static const U16 esStepTab[59] =
+{
+    7,8,9,10,11,12,13,14,16,17,19,21,23,25,28,31,34,37,41,45,
+    50,55,60,66,73,80,88,97,107,118,130,143,157,173,190,209,230,253,279,307,
+    337,371,408,449,494,544,598,658,724,796,876,963,1060,1166,1282,1411,1552,1707,1878
+};
+static U8 s_useEsTables;
+
+static U8 Audio_HasSpanish(void)
+{
+    static U8 state = 0xFF;
+    U32 magic;
+
+    if(state == 0xFF)
+    {
+        SpiFlash_ReadBytes(FLASH_VOICE_ES_ADDR + 0x7F0,(U8 *)&magic,4);
+        state = (magic == FLASH_VOICE_ES_MAGIC) ? 1 : 0;
+    }
+    return state;
+}
 
 static void DmaUpdateMemery(DMA_Channel_TypeDef* channelx,uint32_t memoryAddr,uint32_t number)
 {
@@ -287,6 +319,45 @@ extern void Audio_PlayChanNum(U8 Data)
         }
 
     }
+    else if(Audio_HasSpanish())
+    {
+        // voiceBuf plays from the highest index down. Three digit numbers are read digit by digit.
+        if(Data >= 100)
+        {
+            voice.voiceBuf[2] = i + vo_zero;
+            voice.voiceBuf[1] = j + vo_zero;
+            voice.voiceBuf[0] = k + vo_zero;
+            voice.voiceCnt = 3;
+        }
+        else if(Data <= 10)
+        {
+            voice.voiceBuf[0] = Data + vo_zero;
+            voice.voiceCnt = 1;
+        }
+        else if(Data < 20)
+        {
+            voice.voiceBuf[0] = k + vo_eleven - 1;
+            voice.voiceCnt = 1;
+        }
+        else if(k == 0)
+        {
+            voice.voiceBuf[0] = j + vo_twenty - 3;
+            voice.voiceCnt = 1;
+        }
+        else if(j == 2)
+        {
+            voice.voiceBuf[1] = vo_es_veinti;
+            voice.voiceBuf[0] = k + vo_zero;
+            voice.voiceCnt = 2;
+        }
+        else
+        {
+            voice.voiceBuf[2] = j + vo_twenty - 3;
+            voice.voiceBuf[1] = vo_and;
+            voice.voiceBuf[0] = k + vo_zero;
+            voice.voiceCnt = 3;
+        }
+    }
     else
     {
         if( Data < 20 || (i == 0 && j > 0 && k == 0))
@@ -425,8 +496,8 @@ int Audio_Decoder(U8 *indata, S16 *outdata, int len)
     valpred = s_valprev;   
     index = (int)s_index;  
 
-    step = *((U16*)(stepAddr + (index<<1) ));
-    bufferstep = 0;   
+    step = s_useEsTables ? esStepTab[index] : *((U16*)(stepAddr + (index<<1) ));
+    bufferstep = 0;
 
     len *= 2;   
 
@@ -443,7 +514,14 @@ int Audio_Decoder(U8 *indata, S16 *outdata, int len)
         }   
         bufferstep = !bufferstep;   
 
-        index += *((U32*)(indexAddr + (delta<<2) ));   
+        if(s_useEsTables)
+        {
+            index += esIndexTab[delta];
+        }
+        else
+        {
+            index += *((U32*)(indexAddr + (delta<<2) ));
+        }
         if ( index < 0 ) index = 0;   
         if ( index > 58 ) index = 58;   
         sign = delta & 8;   
@@ -466,7 +544,7 @@ int Audio_Decoder(U8 *indata, S16 *outdata, int len)
                 valpred = 2047;   
         }   
 
-        step = *((U16*)(stepAddr + (index<<1) ));
+        step = s_useEsTables ? esStepTab[index] : *((U16*)(stepAddr + (index<<1) ));
         *outp++ = (short)valpred;
         count++;   
     }   
@@ -483,9 +561,17 @@ extern void Audio_PlayStart(U8 index)
     U16 i,startLen;
     U8  dacBuf[512];
     
-    indexAddr = (index - 0x10)* 8 + FLASH_VOICE_BASIC_ADDR;
+    s_useEsTables = (index >= vo_zero && Audio_HasSpanish()) ? 1 : 0;
+    if(s_useEsTables)
+    {
+        indexAddr = (index - vo_zero) * 8 + FLASH_VOICE_ES_ADDR;
+    }
+    else
+    {
+        indexAddr = (index - 0x10)* 8 + FLASH_VOICE_BASIC_ADDR;
+    }
     SpiFlash_ReadBytes(indexAddr,(U8  *)&g_voiceInform.voiceIndex.length,8);
-    g_voiceInform.voiceIndex.dataAddr += FLASH_VOICE_BASIC_ADDR;
+    g_voiceInform.voiceIndex.dataAddr += s_useEsTables ? FLASH_VOICE_ES_ADDR : FLASH_VOICE_BASIC_ADDR;
 
     if(g_voiceInform.voiceIndex.length > 40960 || g_voiceInform.voiceIndex.length == 0x00)
     {//无音频数据，直接返回

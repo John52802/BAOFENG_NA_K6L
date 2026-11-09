@@ -9,44 +9,10 @@ extern U8 CheckInputScanRange(U16 freqL,U16 freqH)
         return FERROR;
     }
     
-    if((freqL >= 1080) && (freqL < 1360))
+    // A scan may span the whole receive range, across the original bands.
+    if((freqL >= RX_MIN_100KHZ) && (freqH <= RX_MAX_100KHZ))
     {
-        if(freqH <= 1360)
-        {
-            return OK;
-        }  
-    }
-    
-    if((freqL >= bandRang.bandFreq.vhf2L) && (freqL < bandRang.bandFreq.vhf2H))
-    { 
-        if(freqH <= bandRang.bandFreq.vhf2H)
-        {
-            return OK;
-        }       
-    }
-    
-    if((freqL >= bandRang.bandFreq.B350ML) && (freqL < bandRang.bandFreq.B350MH))
-    { 
-        if(freqH <= bandRang.bandFreq.B350MH)
-        {
-            return OK;
-        }  
-    }
-    
-    if((freqL >= bandRang.bandFreq.vhfL) && (freqL < bandRang.bandFreq.vhfH))
-    { 
-        if(freqH <= bandRang.bandFreq.vhfH)
-        {
-            return OK;
-        }  
-    }
-
-    if((freqL >= bandRang.bandFreq.uhfL) && (freqL < bandRang.bandFreq.uhfH))
-    { 
-        if(freqH <= bandRang.bandFreq.uhfH)
-        {
-            return OK;
-        }  
+        return OK;
     }
     return FERROR;
 }
@@ -126,6 +92,9 @@ extern void ScanStart(void)
 
 extern void ScanOff(void)
 {
+    // VFO steps stay in RAM during a scan. Does nothing if the data did not change.
+    Flash_SaveVfoData(g_ChannelVfoInfo.switchAB);
+
     g_scanInfo.state = SCAN_IDLE;
     g_scanInfo.scanTime = 0;
     g_sysRunPara.sysRunMode = MODE_MAIN;
@@ -212,6 +181,7 @@ extern void ScanTask(void)
             
             break;
         case SCAN_STOP:
+            Flash_SaveVfoData(g_ChannelVfoInfo.switchAB);
             g_scanInfo.state = SCAN_IDLE;
             g_scanInfo.scanTime = 0;
             g_sysRunPara.sysRunMode = MODE_MAIN;

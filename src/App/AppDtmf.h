@@ -42,7 +42,7 @@ typedef struct
     U8  enCodeNum;             //当前发码序号
     U8  enCode;                //当前需要发送的编码
     U8  sendFlag;              //正在发码标志
-    U16 timeOut;               //DTMF发码时间或者发码等待时间
+    volatile U16 timeOut;               //DTMF发码时间或者发码等待时间
     U16 detTime;               //DTMF检测时间
     U8  timeRxOut;             //接收解码超时时间
     String aniCode[8];            //呼叫方号码

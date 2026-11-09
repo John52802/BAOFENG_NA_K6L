@@ -289,6 +289,14 @@ extern void KeyProcess_Main(U8 keyEvent)
             BeepOut(BEEP_FMSW1);
             break;
         case KEYID_BAND:
+        case KEYID_SPECTRUM:
+            EnterSpectrumMode();
+            break;
+        case KEYID_AM_SW:
+            g_amForced = !g_amForced;
+            RxReset();
+            DisplayRadioHome();
+            BeepOut(BEEP_FASTSW);
             break;
         case KEYID_STAR:
             Radio_ReverseSwitch();

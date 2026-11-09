@@ -308,6 +308,10 @@ void USART1_Handler(void)
     {
         CheckProgromMode( USART_ReceiveData(USART1));
     }
+
+    /* An overrun also raises this interrupt, and would keep raising it until cleared.
+       Line noise, such as plugging in the cable, can leave these flags set. */
+    USART_ClearFlag(USART1, USART_FLAG_ORE | USART_FLAG_FE | USART_FLAG_NE);
 }
 
 void DMA1Int_Handler(void)
