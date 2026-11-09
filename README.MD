@@ -18,7 +18,7 @@ Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/
 - Recepción de 100 a 999,999 MHz, con banda aérea en AM. Por encima de 600 MHz puede no recibirse nada: el hardware no está pensado para eso.
 - AM opcional en cualquier frecuencia (mantener `2`).
 - Textos en español: `MENU` > `Language` > `Español`.
-- Voces en español en una zona libre de la memoria flash, sin borrar las de fábrica. Este repositorio no incluye los audios.
+- Voces en español en una zona libre de la memoria flash, sin borrar las de fábrica. El código fuente no incluye los audios; el `.exe` de las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases) sí.
 - Vista aproximada de espectro (mantener `1` o pulsar `BAND`). Indica actividad, no una frecuencia exacta: el error medido fue de unos 275 kHz en el ancho de 2 MHz y de unos 3 MHz en el de 10 MHz.
 - El silenciador se respeta por debajo de 130 MHz, y el escaneo por frecuencia ya no graba en la flash a cada paso.
 
@@ -31,7 +31,7 @@ Este trabajo se basa en **[cnt7/BAOFENG-UV-K6-Firmware](https://github.com/cnt7/
 
 ## Compilar el firmware
 
-Hace falta ARM GCC (`arm-none-eabi-gcc`). La lista de archivos y las opciones de compilación están en el `Makefile`, y el mapa de memoria en `kd32f328xb.ld`. Este repositorio no incluye el firmware ya compilado.
+Hace falta ARM GCC (`arm-none-eabi-gcc`). La lista de archivos y las opciones de compilación están en el `Makefile`, y el mapa de memoria en `kd32f328xb.ld`. El firmware ya compilado solo está dentro del `.exe` de las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases).
 
 ## Instalar el firmware
 
@@ -39,7 +39,9 @@ Con el cable de programación conectado, enciende el radio con los 2 botones lat
 
 ## Programa para Windows
 
-`tools/k6-actualizar` es un programa en Rust para sacar copias de la memoria flash, instalar firmware, cambiar voces y editar canales. Solo escribe en las zonas de voces y canales de la memoria flash externa, y nunca borra el chip completo.
+`k6_actualizar.exe` saca copias de la memoria flash, instala firmware, cambia voces y edita canales. Solo escribe en las zonas de voces y canales de la memoria flash externa, y nunca borra el chip completo. Se descarga ya compilado desde las [releases](https://github.com/John52802/BAOFENG_NA_K6L/releases), con el firmware y las voces en español incluidos.
+
+Para compilarlo desde `tools/k6-actualizar`:
 
 ```
 cd tools/k6-actualizar
