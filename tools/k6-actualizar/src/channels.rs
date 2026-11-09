@@ -1,8 +1,8 @@
 //! Radio channels: the format in flash, validation, CSV and writing back to the radio.
 //!
 //! Each channel takes 32 bytes from flash address 0: RX and TX frequency as little endian
-//! BCD in 10 Hz units, RX and TX tone, flags, then a 12-byte name at offset 20. Fields this
-//! program does not edit (power, bandwidth...) are kept exactly as they were.
+//! BCD in 10 Hz units, RX and TX tone, options, then a 12-byte name at offset 20. Anything this
+//! program does not edit (DTMF group, scrambler, learned code...) is kept exactly as it was.
 //!
 //! A tone is a little endian u16, read as in GetCTSDCSType in src/Core/Radio.c: 0 is off,
 //! 1-105 a normal DCS code, 106-210 an inverted one, and above 250 CTCSS in tenths of a Hz.
@@ -48,6 +48,34 @@ const CTCSS_MIN_STORED: u16 = 251; // Lower values are not read as CTCSS by the 
 const FREQ_MIN: u32 = 10_000_000;
 const FREQ_MAX: u32 = 100_000_000;
 
+/// A per-channel option. The value is stored at `offset`, `shift`ed and `mask`ed, as read in
+/// ChannleVfoDataInit in src/Core/Radio.c, and the options follow the radio's menu.
+pub struct ChannelOption {
+    pub label: &'static str,
+    pub column: &'static str,
+    pub help: &'static str,
+    pub options: &'static [&'static str],
+    offset: usize,
+    mask: u8,
+    shift: u8,
+    default: u8,
+}
+
+pub const OPTION_COUNT: usize = 6;
+pub const CHANNEL_OPTIONS: [ChannelOption; OPTION_COUNT] = [
+    ChannelOption { label: "Potencia", column: "potencia", help: "Potencia al transmitir. Baja gasta menos batería y calienta menos.", options: &["Alta", "Baja"], offset: 14, mask: 0x0F, shift: 0, default: 0 },
+    ChannelOption { label: "Ancho", column: "ancho", help: "Ancho de banda. Debe coincidir con el de quien te escucha. Ancha es lo habitual.", options: &["Ancha", "Estrecha"], offset: 15, mask: 1, shift: 6, default: 0 },
+    ChannelOption { label: "Si ocupado", column: "ocupado", help: "Con Sí, el radio no transmite mientras recibe una señal en este canal.", options: &["Transmite", "No transmite"], offset: 15, mask: 1, shift: 3, default: 0 },
+    ChannelOption { label: "En escaneo", column: "escaneo", help: "Si el escaneo de canales pasa por este canal.", options: &["No", "Sí"], offset: 15, mask: 1, shift: 2, default: 1 },
+    ChannelOption { label: "Silencio", column: "silencio", help: "Qué hace falta para abrir el altavoz: solo el tono del canal, o el tono y además la señalización.", options: &["Tono", "Tono y señal"], offset: 15, mask: 3, shift: 4, default: 0 },
+    ChannelOption { label: "PTT ID", column: "ptt_id", help: "Cuándo envía tu identificador DTMF: al empezar a transmitir, al terminar, o en ambos casos.", options: &["No", "Al empezar", "Al terminar", "Ambos"], offset: 13, mask: 0xFF, shift: 0, default: 0 },
+];
+
+/// Spreadsheets can mangle accents, and only the plain letters matter to tell options apart.
+fn plain(text: &str) -> String {
+    text.to_lowercase().replace('í', "i").replace('ñ', "n")
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub struct Channel {
     pub number: usize, // Starting at 1, as the radio shows it.
@@ -56,6 +84,30 @@ pub struct Channel {
     pub name: String,
     pub rx_tone: u16,
     pub tx_tone: u16,
+    /// Stored values, in the order of `CHANNEL_OPTIONS`.
+    pub options: [u8; OPTION_COUNT],
+}
+
+pub fn default_options() -> [u8; OPTION_COUNT] {
+    let mut out = [0; OPTION_COUNT];
+    for (v, o) in out.iter_mut().zip(&CHANNEL_OPTIONS) {
+        *v = o.default;
+    }
+    out
+}
+
+impl Default for Channel {
+    fn default() -> Self {
+        Channel { number: 1, rx: 0, tx: 0, name: String::new(), rx_tone: 0, tx_tone: 0, options: default_options() }
+    }
+}
+
+fn read_options(c: &[u8]) -> [u8; OPTION_COUNT] {
+    let mut out = [0; OPTION_COUNT];
+    for (v, o) in out.iter_mut().zip(&CHANNEL_OPTIONS) {
+        *v = (c[o.offset] >> o.shift) & o.mask;
+    }
+    out
 }
 
 /// Shows a stored tone: "" (off), "88.5", "D023N" or "D023I". Anything else the radio
@@ -178,6 +230,7 @@ pub fn parse_channels(area: &[u8]) -> Vec<Channel> {
                 name: parse_name(&c[NAME_OFFSET..NAME_OFFSET + NAME_SIZE]),
                 rx_tone: u16::from_le_bytes([c[TONE_RX_OFFSET], c[TONE_RX_OFFSET + 1]]),
                 tx_tone: u16::from_le_bytes([c[TONE_TX_OFFSET], c[TONE_TX_OFFSET + 1]]),
+                options: read_options(c),
             });
         }
     }
@@ -203,6 +256,12 @@ pub fn apply_channels(area: &[u8], channels: &[Channel]) -> Res<Vec<u8>> {
         }
         if !is_standard_tone(c.tx_tone) && before.map(|o| o.tx_tone) != Some(c.tx_tone) {
             return Err(format!("Canal {}: \"{}\" no es un tono estándar", c.number, format_tone(c.tx_tone)));
+        }
+        for (i, o) in CHANNEL_OPTIONS.iter().enumerate() {
+            let same = before.map(|b| b.options[i]) == Some(c.options[i]);
+            if c.options[i] as usize >= o.options.len() && !same {
+                return Err(format!("Canal {}: valor no válido en {}", c.number, o.label));
+            }
         }
     }
     for o in &old {
@@ -231,6 +290,10 @@ pub fn apply_channels(area: &[u8], channels: &[Channel]) -> Res<Vec<u8>> {
         out[at + 4..at + 8].copy_from_slice(&to_bcd(c.tx));
         out[at + TONE_RX_OFFSET..at + TONE_RX_OFFSET + 2].copy_from_slice(&c.rx_tone.to_le_bytes());
         out[at + TONE_TX_OFFSET..at + TONE_TX_OFFSET + 2].copy_from_slice(&c.tx_tone.to_le_bytes());
+        for (v, o) in c.options.iter().zip(&CHANNEL_OPTIONS) {
+            let byte = &mut out[at + o.offset];
+            *byte = (*byte & !(o.mask << o.shift)) | ((*v & o.mask) << o.shift);
+        }
         let name = &mut out[at + NAME_OFFSET..at + NAME_OFFSET + NAME_SIZE];
         name.fill(0xFF);
         name[..c.name.len()].copy_from_slice(c.name.as_bytes());
@@ -239,10 +302,15 @@ pub fn apply_channels(area: &[u8], channels: &[Channel]) -> Res<Vec<u8>> {
 }
 
 pub fn to_csv(channels: &[Channel]) -> String {
-    let mut s = String::from("canal,rx_mhz,tx_mhz,nombre,tono_rx,tono_tx\r\n");
+    let mut s = String::from("canal,rx_mhz,tx_mhz,nombre,tono_rx,tono_tx");
+    for o in &CHANNEL_OPTIONS {
+        s.push(',');
+        s.push_str(o.column);
+    }
+    s.push_str("\r\n");
     for c in channels {
         s.push_str(&format!(
-            "{},{},{},{},{},{}\r\n",
+            "{},{},{},{},{},{}",
             c.number,
             format_mhz(c.rx),
             format_mhz(c.tx),
@@ -250,6 +318,14 @@ pub fn to_csv(channels: &[Channel]) -> String {
             format_tone(c.rx_tone),
             format_tone(c.tx_tone)
         ));
+        for (v, o) in c.options.iter().zip(&CHANNEL_OPTIONS) {
+            s.push(',');
+            // An unusual stored value is left empty, which keeps what the radio has on import.
+            if let Some(text) = o.options.get(*v as usize) {
+                s.push_str(&plain(text));
+            }
+        }
+        s.push_str("\r\n");
     }
     s
 }
@@ -267,8 +343,8 @@ pub fn from_csv(text: &str, current: &[Channel]) -> Res<Vec<Channel>> {
         let sep = if line.contains(';') { ';' } else { ',' };
         let f: Vec<&str> = line.split(sep).map(str::trim).collect();
         let row = i + 1;
-        if !matches!(f.len(), 3 | 4 | 6) {
-            return Err(format!("Fila {row}: se esperaban canal, RX, TX, nombre, tono RX y tono TX"));
+        if !matches!(f.len(), 3 | 4 | 6 | 12) {
+            return Err(format!("Fila {row}: se esperaban canal, RX, TX, nombre, tonos y opciones"));
         }
         let number: usize = f[0].parse().map_err(|_| format!("Fila {row}: canal no válido \"{}\"", f[0]))?;
         if number == 0 || number > CHANNEL_COUNT {
@@ -281,7 +357,7 @@ pub fn from_csv(text: &str, current: &[Channel]) -> Res<Vec<Channel>> {
         let tx = if f[2].is_empty() { rx } else { parse_mhz(f[2]).map_err(|e| format!("Fila {row}: {e}"))? };
         let name = f.get(3).copied().unwrap_or("").to_string();
         check_name(&name).map_err(|e| format!("Fila {row}: {e}"))?;
-        let (rx_tone, tx_tone) = if f.len() == 6 {
+        let (rx_tone, tx_tone) = if f.len() >= 6 {
             (
                 parse_tone(f[4]).map_err(|e| format!("Fila {row}: {e}"))?,
                 parse_tone(f[5]).map_err(|e| format!("Fila {row}: {e}"))?,
@@ -289,7 +365,20 @@ pub fn from_csv(text: &str, current: &[Channel]) -> Res<Vec<Channel>> {
         } else {
             current.iter().find(|c| c.number == number).map_or((0, 0), |c| (c.rx_tone, c.tx_tone))
         };
-        out.push(Channel { number, rx, tx, name, rx_tone, tx_tone });
+        let known = current.iter().find(|c| c.number == number);
+        let mut options = known.map_or(default_options(), |c| c.options);
+        if f.len() == 12 {
+            for (i, o) in CHANNEL_OPTIONS.iter().enumerate() {
+                let text = f[6 + i];
+                if text.is_empty() {
+                    continue;
+                }
+                let wanted = plain(text);
+                let at = o.options.iter().position(|x| plain(x) == wanted);
+                options[i] = at.ok_or_else(|| format!("Fila {row}: {} no válido: \"{text}\"", o.label))? as u8;
+            }
+        }
+        out.push(Channel { number, rx, tx, name, rx_tone, tx_tone, options });
     }
     out.sort_by_key(|c| c.number);
     Ok(out)
@@ -404,7 +493,7 @@ mod tests {
     #[test]
     fn adding_and_deleting_channels() {
         let a = area();
-        let new = Channel { number: 5, rx: 14_500_000, tx: 14_500_000, name: "NUEVO".into(), rx_tone: 0, tx_tone: 0 };
+        let new = Channel { number: 5, rx: 14_500_000, tx: 14_500_000, name: "NUEVO".into(), rx_tone: 0, tx_tone: 0, ..Default::default() };
         let out = apply_channels(&a, &[new.clone()]).unwrap();
         assert_eq!(parse_channels(&out), vec![new]);
         assert!(out[..32].iter().all(|&b| b == 0xFF), "Channel 1 was removed from the list");
@@ -414,7 +503,7 @@ mod tests {
     #[test]
     fn invalid_edits_are_refused() {
         let a = area();
-        let ok = Channel { number: 2, rx: 14_500_000, tx: 14_500_000, name: String::new(), rx_tone: 0, tx_tone: 0 };
+        let ok = Channel { number: 2, rx: 14_500_000, tx: 14_500_000, name: String::new(), rx_tone: 0, tx_tone: 0, ..Default::default() };
         for bad in [
             Channel { number: 0, ..ok.clone() },
             Channel { number: 1000, ..ok.clone() },
@@ -432,18 +521,105 @@ mod tests {
     #[test]
     fn csv_round_trip_and_spreadsheet_format() {
         let list = vec![
-            Channel { number: 1, rx: 14_492_500, tx: 14_492_500, name: "AWJverse".into(), rx_tone: 885, tx_tone: 106 },
-            Channel { number: 7, rx: 43_152_500, tx: 44_152_500, name: String::new(), rx_tone: 0, tx_tone: 1 },
+            Channel { number: 1, rx: 14_492_500, tx: 14_492_500, name: "AWJverse".into(), rx_tone: 885, tx_tone: 106, ..Default::default() },
+            Channel { number: 7, rx: 43_152_500, tx: 44_152_500, name: String::new(), rx_tone: 0, tx_tone: 1, ..Default::default() },
         ];
         assert_eq!(from_csv(&to_csv(&list), &[]).unwrap(), list);
         let excel = "\u{feff}canal;rx_mhz;tx_mhz;nombre\r\n2;145,5;;Repetidor\r\n";
         assert_eq!(
             from_csv(excel, &[]).unwrap(),
-            vec![Channel { number: 2, rx: 14_550_000, tx: 14_550_000, name: "Repetidor".into(), rx_tone: 0, tx_tone: 0 }]
+            vec![Channel { number: 2, rx: 14_550_000, tx: 14_550_000, name: "Repetidor".into(), rx_tone: 0, tx_tone: 0, ..Default::default() }]
         );
         for bad in ["1,145.5", "abc,145,145", "1,145.5,145.5\n1,146,146", "0,145,145", "1,50,50", "1,145,145,A,88.5", "1,145,145,A,D999N,"] {
             assert!(from_csv(bad, &[]).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn options_are_read_from_the_bits_the_firmware_reads() {
+        let src = String::from_utf8_lossy(include_bytes!("../../../src/Core/Radio.c")).replace(' ', "");
+        for needed in [
+            ".wideNarrow=g_ChannelVfoInfo.channelInfo[flagAB].chFlag3.Bit.b6",
+            ".txPower=g_ChannelVfoInfo.channelInfo[flagAB].txPower&0x0F",
+            ".busyLock=g_ChannelVfoInfo.channelInfo[flagAB].chFlag3.Bit.b3",
+            ".spMute=g_ChannelVfoInfo.channelInfo[flagAB].chFlag3.Bit.spMute",
+            ".pttIdMode=g_ChannelVfoInfo.channelInfo[flagAB].pttID",
+            "if(readData[0]&BIT2)",
+        ] {
+            assert!(src.contains(needed), "{needed}");
+        }
+        let flags = String::from_utf8_lossy(include_bytes!("../../../src/Common/PublType.h")).replace(char::is_whitespace, "");
+        assert!(flags.contains("b0:1;__BYTEb1:1;__BYTEb2:1;__BYTEb3:1;__BYTEspMute:2;__BYTEb6:1;"));
+
+        // Bytes 12 to 15 of a channel a radio saved itself: low power, scan on.
+        let mut a = area();
+        a[12..16].copy_from_slice(&[0x05, 0x02, 0x01, 0b0100_1100]);
+        let got = parse_channels(&a)[0].options;
+        assert_eq!(got, [1, 1, 1, 1, 0, 2]);
+    }
+
+    #[test]
+    fn editing_an_option_keeps_its_neighbours() {
+        let mut a = area();
+        a[12] = 0x05; // DTMF group.
+        a[14] = 0x20; // High nibble: scrambler.
+        a[15] = 0b1000_0011; // Learned code flag, a reserved bit and an unused one.
+        a[16..20].copy_from_slice(&[1, 2, 3, 4]);
+        let mut list = parse_channels(&a);
+        list[0].options = [1, 1, 1, 1, 1, 3];
+        let out = apply_channels(&a, &list).unwrap();
+        assert_eq!(out[12], 0x05);
+        assert_eq!(out[13], 3);
+        assert_eq!(out[14], 0x21, "Power is the low nibble only");
+        assert_eq!(out[15], 0b1101_1111);
+        assert_eq!(out[16..20], [1, 2, 3, 4]);
+
+        // And each one can be switched back off alone.
+        let mut list = parse_channels(&out);
+        list[0].options[1] = 0;
+        assert_eq!(apply_channels(&out, &list).unwrap()[15], 0b1001_1111);
+    }
+
+    #[test]
+    fn new_channels_get_what_the_radio_gives_its_own() {
+        let new = Channel { number: 9, rx: 14_500_000, tx: 14_500_000, ..Default::default() };
+        assert_eq!(new.options, [0, 0, 0, 1, 0, 0]);
+        let out = apply_channels(&area(), &[new.clone()]).unwrap();
+        assert_eq!(out[8 * 32 + FLAGS_OFFSET], DEFAULT_FLAGS);
+        assert_eq!(parse_channels(&out), vec![new]);
+    }
+
+    #[test]
+    fn bad_option_values_are_refused_but_odd_stored_ones_stay() {
+        let a = area(); // Its power byte holds 3, which the menu doesn't offer.
+        let list = parse_channels(&a);
+        assert_eq!(list[0].options[0], 3);
+        assert_eq!(apply_channels(&a, &list).unwrap(), a);
+        let mut bad = list.clone();
+        bad[0].options[5] = 9;
+        assert!(apply_channels(&a, &bad).is_err());
+        let new = Channel { number: 9, rx: 14_500_000, tx: 14_500_000, options: [3, 0, 0, 1, 0, 0], ..Default::default() };
+        assert!(apply_channels(&a, &[new]).is_err());
+    }
+
+    #[test]
+    fn options_survive_a_file_and_old_files_keep_them() {
+        let c = Channel { number: 3, rx: 14_500_000, tx: 14_500_000, options: [1, 1, 1, 0, 1, 3], ..Default::default() };
+        assert_eq!(from_csv(&to_csv(&[c.clone()]), &[]).unwrap(), vec![c.clone()]);
+
+        // Without the columns, or with an empty one, the channel keeps what it has.
+        assert_eq!(from_csv("3,145,145,,,", &[c.clone()]).unwrap()[0].options, c.options);
+        assert_eq!(from_csv("3,145,145,,,,,,,,,", &[c.clone()]).unwrap()[0].options, c.options);
+        assert_eq!(from_csv("4,145,145", &[c.clone()]).unwrap()[0].options, default_options());
+
+        // Spreadsheets may change case and accents.
+        let got = from_csv("3;145;145;;;;BAJA;ancha;No transmite;SI;tono;ambos", &[]).unwrap();
+        assert_eq!(got[0].options, [1, 0, 1, 1, 0, 3]);
+        assert!(from_csv("3,145,145,,,,media,,,,,", &[]).is_err());
+
+        // An unusual stored value leaves its column empty, so it isn't lost.
+        let odd = Channel { options: [3, 0, 0, 1, 0, 0], ..c };
+        assert_eq!(from_csv(&to_csv(&[odd.clone()]), &[odd.clone()]).unwrap()[0].options, odd.options);
     }
 
     #[test]
@@ -513,7 +689,7 @@ mod tests {
 
     #[test]
     fn old_csv_files_keep_the_current_tones() {
-        let current = vec![Channel { number: 2, rx: 14_500_000, tx: 14_500_000, name: String::new(), rx_tone: 885, tx_tone: 1 }];
+        let current = vec![Channel { number: 2, rx: 14_500_000, tx: 14_500_000, name: String::new(), rx_tone: 885, tx_tone: 1, ..Default::default() }];
         let list = from_csv("2,145.5,,A\n3,146,,B\n", &current).unwrap();
         assert_eq!((list[0].rx_tone, list[0].tx_tone), (885, 1));
         assert_eq!((list[1].rx_tone, list[1].tx_tone), (0, 0));

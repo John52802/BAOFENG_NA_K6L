@@ -1231,7 +1231,7 @@ mod tests {
         let loaded = channels::read_from_radio(&mut radio).unwrap();
         let mut list = channels::parse_channels(&loaded);
         list[0].rx = 14_652_000;
-        list.push(channels::Channel { number: 200, rx: 14_500_000, tx: 14_500_000, name: "NUEVO".into(), rx_tone: 0, tx_tone: 0 });
+        list.push(channels::Channel { number: 200, rx: 14_500_000, tx: 14_500_000, name: "NUEVO".into(), rx_tone: 0, tx_tone: 0, ..Default::default() });
         let wanted = channels::apply_channels(&loaded, &list).unwrap();
         let (changed, _) = channels::write_to_radio(&mut radio, &loaded, &wanted, &dir).unwrap();
         assert_eq!(changed, 2); // Channel 1 and channel 200 are in different sectors.

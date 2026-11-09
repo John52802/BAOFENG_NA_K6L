@@ -26,6 +26,7 @@ extern void Rfic_BandInitial(U32 freq);
 #define SP_COLS_PER_POINT 2 /* Fewer points, so the longer wait keeps a sweep near 2 seconds */
 #define SP_START_WAIT  800  /* ms: the level reading restarts when the receiver is switched on */
 #define SP_MIN_RANGE   20
+#define SP_REDRAW_COLS 16   /* A new span draws as it goes, so a key press shows at once */
 #define SP_RX_MIN      (RX_MIN_100KHZ * 10000UL)
 #define SP_RX_MAX      (RX_MAX_100KHZ * 10000UL)
 
@@ -136,7 +137,8 @@ static void SpTune(U32 freq)
     Rfic_WriteWord(0x30, 0xBFF1);
 }
 
-static void SpDraw(U8 peakCol, U8 minVal, U8 maxVal)
+/* Draws the columns before `upto`. With none yet, only the header, without a peak. */
+static void SpDraw(U8 upto, U8 peakCol, U8 minVal, U8 maxVal)
 {
     String text[32];
     U32 span = spSpanTab[spSpanIdx];
@@ -152,13 +154,22 @@ static void SpDraw(U8 peakCol, U8 minVal, U8 maxVal)
 
     LCD_ClearWorkArea();
 
-    sprintf(text, "%3lu.%03lu ~%3lu.%03lu %2luM",
-            spCenter / 100000UL, (spCenter % 100000UL) / 100UL,
-            peak / 100000UL, (peak % 100000UL) / 100UL,
-            span / 100000UL);
+    if(upto == 0)
+    {
+        sprintf(text, "%3lu.%03lu ~---.--- %2luM",
+                spCenter / 100000UL, (spCenter % 100000UL) / 100UL,
+                span / 100000UL);
+    }
+    else
+    {
+        sprintf(text, "%3lu.%03lu ~%3lu.%03lu %2luM",
+                spCenter / 100000UL, (spCenter % 100000UL) / 100UL,
+                peak / 100000UL, (peak % 100000UL) / 100UL,
+                span / 100000UL);
+    }
     LCD_DisplayText(9, 0, (U8 *)text, FONTSIZE_12x12, LCD_DIS_NORMAL);
 
-    for(col = 0; col < SP_COLS; col++)
+    for(col = 0; col < upto; col++)
     {
         height = (U8)(((U16)(spRssi[col] - minVal) * SP_GRAPH_H) / range);
         for(y = SP_GRAPH_TOP + SP_GRAPH_H - height; y < SP_GRAPH_TOP + SP_GRAPH_H; y++)
@@ -171,7 +182,7 @@ static void SpDraw(U8 peakCol, U8 minVal, U8 maxVal)
     gLcdBuffer[SP_GRAPH_TOP / 8][SP_COLS / 2] |= 0x07;
 
     /* A flat sweep has nothing to draw: show the raw reading instead of an empty graph. */
-    if(maxVal - minVal < 2)
+    if(upto == SP_COLS && maxVal - minVal < 2)
     {
         sprintf(text, "RSSI %u", maxVal);
         LCD_DisplayText(36, 40, (U8 *)text, FONTSIZE_12x12, LCD_DIS_NORMAL);
@@ -182,7 +193,7 @@ static void SpDraw(U8 peakCol, U8 minVal, U8 maxVal)
 
 extern void EnterSpectrumMode(void)
 {
-    U8  col, action, peakCol, minVal, maxVal;
+    U8  col, action, peakCol, minVal, maxVal, fresh;
     U16 reading;
     U32 start, step;
     U16 savedAgc;
@@ -200,8 +211,8 @@ extern void EnterSpectrumMode(void)
     spLastBand = 0xFF; /* RfOff above cut the RX path, force it back on. */
     SpClampCenter();
 
-    LCD_ClearWorkArea();
-    LCD_UpdateWorkAre();
+    SpDraw(0, 0, 0, 0);
+    fresh = TRUE;
 
     savedAgc = Rfic_ReadWord(SP_AGC_REG);
     Rfic_WriteWord(SP_AGC_REG, (savedAgc & SP_AGC_MASK) | SP_AGC_FIXED);
@@ -230,6 +241,7 @@ extern void EnterSpectrumMode(void)
             reading = Rfic_GetRssiVal();
             spRssi[col] = (reading > 0xFF) ? 0xFF : (U8)reading;
             spRssi[col + 1] = spRssi[col];
+            /* Later sweeps keep the last full picture until they finish, to avoid flicker. */
 
             if(spRssi[col] < minVal)
             {
@@ -240,6 +252,10 @@ extern void EnterSpectrumMode(void)
                 maxVal = spRssi[col];
                 peakCol = col;
             }
+            if(fresh && (col + SP_COLS_PER_POINT) % SP_REDRAW_COLS == 0)
+            {
+                SpDraw(col + SP_COLS_PER_POINT, peakCol, minVal, maxVal);
+            }
         }
 
         if(action == SP_EXIT)
@@ -248,7 +264,14 @@ extern void EnterSpectrumMode(void)
         }
         if(action == SP_KEEP_GOING)
         {
-            SpDraw(peakCol, minVal, maxVal);
+            SpDraw(SP_COLS, peakCol, minVal, maxVal);
+            fresh = FALSE;
+        }
+        else
+        {
+            /* A key changed the span or centre: show it now, without waiting for a sweep. */
+            SpDraw(0, 0, 0, 0);
+            fresh = TRUE;
         }
     }
 

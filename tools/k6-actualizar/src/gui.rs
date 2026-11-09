@@ -14,11 +14,11 @@ use std::time::Duration;
 
 // The smallest the window's contents can be, and the height it opens with. The user's own screen
 // has about 720 dots of usable height, title bar included, so these must stay well under that.
-const BASE_WIDTH: i32 = 960;
+const BASE_WIDTH: i32 = 1020;
 const BASE_HEIGHT: i32 = 640;
 const OPEN_HEIGHT: i32 = 660;
 // These include the title bar and borders, which the sizes above don't count.
-const MIN_OUTER_WIDTH: i32 = 980;
+const MIN_OUTER_WIDTH: i32 = 1040;
 const MIN_OUTER_HEIGHT: i32 = 685;
 // Container height at BASE_HEIGHT: leaves the settings tab the room its rows and buttons need.
 const BASE_TABS_HEIGHT: i32 = 364;
@@ -75,6 +75,8 @@ struct Ui {
     tx_tone_label: nwg::Label,
     tx_tone: nwg::TextInput,
     tone_hint: nwg::Label,
+    option_labels: Vec<nwg::Label>,
+    option_boxes: Vec<nwg::ComboBox<String>>,
     apply: nwg::Button,
     delete: nwg::Button,
     read: nwg::Button,
@@ -179,6 +181,9 @@ impl Ui {
         self.delete.set_enabled(idle && loaded);
         self.import.set_enabled(idle && loaded);
         self.export.set_enabled(idle && loaded);
+        for b in &self.option_boxes {
+            b.set_enabled(idle && loaded);
+        }
         let has_settings = self.settings_data.borrow().is_some();
         self.settings_read.set_enabled(has_port);
         self.settings_save.set_enabled(has_port && has_settings);
@@ -391,6 +396,10 @@ impl Ui {
     }
 
     fn show_setting_help(&self, handle: nwg::ControlHandle) {
+        let option = channels::CHANNEL_OPTIONS.iter().zip(&self.option_boxes).find(|(_, b)| b.handle == handle);
+        if let Some((o, _)) = option {
+            self.status.set_text(&format!("{}: {}", o.label, o.help));
+        }
         let field = settings::FIELDS.iter().zip(&self.setting_boxes).find(|(_, b)| b.handle == handle);
         if let Some((f, _)) = field {
             self.status.set_text(&format!("{}: {}", f.label, settings::help(f)));
@@ -552,10 +561,15 @@ impl Ui {
         self.text_label.set_size((tw - 36) as u32, 22);
 
         // Channels: the list and its name column take the extra room.
-        let list_w = tw - 276;
+        let list_w = tw - 496;
         let list_h = th - 90;
         self.list.set_size(list_w as u32, list_h as u32);
-        self.list.set_column_width(3, (98 + list_w - 440) as isize);
+        self.list.update_column(3, nwg::InsertListViewColumn {
+            index: Some(3),
+            fmt: None,
+            width: Some(98 + list_w - 500),
+            text: Some("Nombre".to_string()),
+        });
         let x = 10 + list_w + 14;
         for (y, label, input) in [
             (10, &self.num_label, &self.num),
@@ -567,6 +581,11 @@ impl Ui {
         ] {
             label.set_position(x, y + 2);
             input.set_position(x + 114, y);
+        }
+        for (i, (label, input)) in self.option_labels.iter().zip(&self.option_boxes).enumerate() {
+            let y = 10 + i as i32 * 36;
+            label.set_position(x + 232, y + 2);
+            input.set_position(x + 330, y);
         }
         self.apply.set_position(x, 226);
         self.delete.set_position(x + 114, 226);
@@ -638,6 +657,8 @@ impl Ui {
                 c.name.clone(),
                 channels::format_tone(c.rx_tone),
                 channels::format_tone(c.tx_tone),
+                option_text(c, 0),
+                option_text(c, 1),
             ];
             self.list.insert_items_row(None, &row);
         }
@@ -653,6 +674,9 @@ impl Ui {
         self.name.set_text(&c.name);
         self.rx_tone.set_text(&channels::format_tone(c.rx_tone));
         self.tx_tone.set_text(&channels::format_tone(c.tx_tone));
+        for ((b, o), v) in self.option_boxes.iter().zip(&channels::CHANNEL_OPTIONS).zip(c.options) {
+            b.set_selection(((v as usize) < o.options.len()).then_some(v as usize));
+        }
     }
 
     fn edited_channel(&self) -> Result<Channel, String> {
@@ -672,7 +696,15 @@ impl Ui {
         channels::check_name(&name)?;
         let rx_tone = channels::parse_tone(&self.rx_tone.text())?;
         let tx_tone = channels::parse_tone(&self.tx_tone.text())?;
-        Ok(Channel { number, rx, tx, name, rx_tone, tx_tone })
+        // An option left unselected keeps what the channel has.
+        let known = self.channels.borrow().iter().find(|c| c.number == number).map(|c| c.options);
+        let mut options = known.unwrap_or_else(channels::default_options);
+        for (v, b) in options.iter_mut().zip(&self.option_boxes) {
+            if let Some(i) = b.selection() {
+                *v = i as u8;
+            }
+        }
+        Ok(Channel { number, rx, tx, name, rx_tone, tx_tone, options })
     }
 
     fn on_apply(&self) {
@@ -718,7 +750,6 @@ impl Ui {
             "Guardar canales",
             "Se guardará antes una copia de los canales actuales y luego se\n\
              reescribirán solo las zonas de memoria que cambiaron.\n\n\
-             La potencia y los demás ajustes de cada canal se conservan.\n\
              No desconectes el cable ni apagues el radio durante el proceso.",
         );
         if ok {
@@ -734,7 +765,9 @@ impl Ui {
             return;
         }
         let Ok(file) = self.csv_open.get_selected_item() else { return };
-        let result = fs::read_to_string(&file)
+        // Spreadsheets may save in another text encoding: names are checked afterwards anyway.
+        let result = fs::read(&file)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .map_err(|e| format!("No se pudo leer el archivo: {e}"))
             .and_then(|text| channels::from_csv(&text, &self.channels.borrow()));
         match result {
@@ -762,6 +795,11 @@ impl Ui {
             Err(e) => self.message(&format!("No se pudo guardar: {e}"), nwg::MessageIcons::Error),
         }
     }
+}
+
+fn option_text(c: &Channel, i: usize) -> String {
+    let at = c.options[i] as usize;
+    channels::CHANNEL_OPTIONS[i].options.get(at).map_or_else(|| format!("?{at}"), |t| t.to_string())
 }
 
 /// Loads any picture Windows can read as brightness values for the whole screen.
@@ -856,7 +894,7 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         .ex_flags(nwg::ListViewExFlags::FULL_ROW_SELECT | nwg::ListViewExFlags::GRID)
         .parent(t)
         .build(&mut ui.list)?;
-    for (i, (text, width)) in [("Canal", 46), ("RX (MHz)", 78), ("TX (MHz)", 78), ("Nombre", 98), ("Tono RX", 66), ("Tono TX", 66)].iter().enumerate() {
+    for (i, (text, width)) in [("Canal", 46), ("RX (MHz)", 70), ("TX (MHz)", 70), ("Nombre", 98), ("Tono RX", 58), ("Tono TX", 58), ("Pot.", 44), ("Ancho", 56)].iter().enumerate() {
         ui.list.insert_column(nwg::InsertListViewColumn {
             index: Some(i as i32),
             fmt: None,
@@ -879,6 +917,18 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
     nwg::TextInput::builder().limit(6).position((x + 114, 154)).size((110, 26)).parent(t).build(&mut ui.rx_tone)?;
     nwg::Label::builder().text("Tono TX:").position((x, 192)).size((110, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.tx_tone_label)?;
     nwg::TextInput::builder().limit(6).position((x + 114, 190)).size((110, 26)).parent(t).build(&mut ui.tx_tone)?;
+    ui.option_labels = channels::CHANNEL_OPTIONS.iter().map(|_| Default::default()).collect();
+    ui.option_boxes = channels::CHANNEL_OPTIONS.iter().map(|_| Default::default()).collect();
+    for (i, o) in channels::CHANNEL_OPTIONS.iter().enumerate() {
+        let y = 10 + i as i32 * 36;
+        nwg::Label::builder().text(o.label).position((x + 232, y + 2)).size((96, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.option_labels[i])?;
+        nwg::ComboBox::builder()
+            .collection(o.options.iter().map(|x| x.to_string()).collect())
+            .position((x + 330, y))
+            .size((118, 26))
+            .parent(t)
+            .build(&mut ui.option_boxes[i])?;
+    }
     nwg::Button::builder().text("Aplicar").position((x, 226)).size((110, 32)).parent(t).build(&mut ui.apply)?;
     nwg::Button::builder().text("Borrar canal").position((x + 114, 226)).size((110, 32)).parent(t).build(&mut ui.delete)?;
     nwg::Label::builder().text("Tonos: 88.5 (CTCSS), D023N o D023I (DCS). Vacío: sin tono.").position((10, 238)).size((440, 22)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.tone_hint)?;
@@ -919,6 +969,9 @@ fn build(ui: &mut Ui) -> Result<(), nwg::NwgError> {
         ui.tooltip.register(b, settings::help(f));
     }
     ui.tooltip.register(&ui.message_text, settings::MESSAGE_HELP);
+    for (o, b) in channels::CHANNEL_OPTIONS.iter().zip(&ui.option_boxes) {
+        ui.tooltip.register(b, o.help);
+    }
     nwg::Label::builder().text("Pedir clave").position((x, y + 3)).size((104, 20)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.password_on_label)?;
     nwg::ComboBox::builder().collection(vec!["No".to_string(), "Sí".to_string()]).position((x + 106, y)).size((118, 24)).parent(t).build(&mut ui.password_on)?;
     nwg::Label::builder().text("Clave (6 núm.)").position((x, y + 3)).size((104, 20)).background_color(Some([255, 255, 255])).parent(t).build(&mut ui.password_label)?;
