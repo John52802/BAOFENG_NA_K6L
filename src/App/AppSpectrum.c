@@ -6,12 +6,16 @@
  * Runs its own loop instead of the main task loop. PTT_ScanTask and RF_Task are
  * never called from here, so the radio cannot enter TX while this mode is open.
  *
- * Keys: UP/DOWN move the centre, * narrows the span, # widens it, EXIT or MENU leaves.
+ * Keys: UP/DOWN move the centre, * narrows the span, # widens it, MENU goes towards the
+ * peak: it zooms in on it and, at the narrowest span, listens to it. EXIT leaves.
+ * Listening tunes the receiver only. The VFO and channels aren't changed.
  * Frequencies are in units of 10 Hz, matching the rest of the firmware.
  */
 
 extern U8 gLcdBuffer[8][128];
 extern void Rfic_BandInitial(U32 freq);
+extern Boolean Rfic_IsAmRx(U32 freq);
+extern void Rfic_SetScramble(U8 group, U32 freq);
 
 #define SP_COLS        128
 #define SP_GRAPH_TOP   24
@@ -30,7 +34,21 @@ extern void Rfic_BandInitial(U32 freq);
 #define SP_RX_MIN      (RX_MIN_100KHZ * 10000UL)
 #define SP_RX_MAX      (RX_MAX_100KHZ * 10000UL)
 
-enum { SP_KEEP_GOING = 0, SP_RESTART, SP_EXIT };
+/* The level reading lags the tuning, so a sweep upwards shows a peak above the real signal:
+   measured about 275 kHz off at 2 MHz of span, and 3 MHz off at 10 MHz. */
+#define SP_ZOOM_SHIFT_DIV 5    /* Zooming in moves down this part of the span, towards the signal. */
+#define SP_FIND_BELOW  45000UL /* The exact search covers 450 kHz below the peak... */
+#define SP_FIND_ABOVE  10000UL /* ...and 100 kHz above it... */
+#define SP_FIND_STEP   1250UL  /* ...in steps of 12.5 kHz. */
+#define SP_FIND_WAIT   300     /* ms: lets the reading forget the frequency before. */
+#define SP_LISTEN_STEP 500UL   /* The arrows move 5 kHz while listening. */
+#define SP_BAR_LEFT    20
+#define SP_BAR_WIDTH   88
+#define SP_BAR_PAGE    5       /* Row of the LCD buffer: dots 40 to 47. */
+#define SP_RSSI_LOW    35      /* The same scale as the bar of the main screen. */
+#define SP_RSSI_HIGH   115
+
+enum { SP_KEEP_GOING = 0, SP_RESTART, SP_EXIT, SP_PEAK };
 
 static const U32 spSpanTab[] = { 200000UL, 500000UL, 1000000UL, 2000000UL, 5000000UL };
 #define SP_SPAN_CNT    (sizeof(spSpanTab) / sizeof(spSpanTab[0]))
@@ -39,6 +57,8 @@ static U32 spCenter;
 static U8  spSpanIdx;
 static U8  spRssi[SP_COLS];
 static U8  spLastBand;
+static U32 spShownPeak;   /* The peak in the header, and whether there is a real one. */
+static U8  spHasPeak;
 
 static void SpClampCenter(void)
 {
@@ -83,8 +103,9 @@ static U8 SpHandleKey(U8 keyEvent)
             spSpanIdx++;
             break;
         case KEYID_EXIT:
-        case KEYID_MENU:
             return SP_EXIT;
+        case KEYID_MENU:
+            return SP_PEAK;
         default:
             return SP_KEEP_GOING;
     }
@@ -93,8 +114,8 @@ static U8 SpHandleKey(U8 keyEvent)
     return SP_RESTART;
 }
 
-/* Keeps keys, backlight and the power switch alive during a sweep. */
-static U8 SpService(void)
+/* Keeps keys, backlight and the power switch alive. */
+static void SpServiceTasks(void)
 {
     if(g_10msFlag)
     {
@@ -112,7 +133,11 @@ static U8 SpService(void)
         CheckPowerOff();
     }
     g_500msFlag = FALSE;
+}
 
+static U8 SpService(void)
+{
+    SpServiceTasks();
     if(g_keyScan.keyEvent != KEYID_NONE)
     {
         return SpHandleKey(Key_GetRealEvent());
@@ -144,6 +169,9 @@ static void SpDraw(U8 upto, U8 peakCol, U8 minVal, U8 maxVal)
     U32 span = spSpanTab[spSpanIdx];
     U32 start = spCenter - span / 2;
     U32 peak = start + (span / SP_COLS) * peakCol;
+    /* A flat sweep has no peak: the first column would look like one. */
+    spHasPeak = (upto != 0 && maxVal - minVal >= 2);
+    spShownPeak = spHasPeak ? peak : spCenter;
     U16 range = maxVal - minVal;
     U8 col, y, height;
 
@@ -189,6 +217,185 @@ static void SpDraw(U8 upto, U8 peakCol, U8 minVal, U8 maxVal)
     }
 
     LCD_UpdateWorkAre();
+}
+
+static void SpShowText(U8 y, U8 x, String *text, U8 font)
+{
+    LCD_DisplayText(y, x, (U8 *)text, font, LCD_DIS_NORMAL);
+}
+
+/* A sweep up and a sweep down lag in opposite directions, so the signal is halfway between
+   their peaks. Returns `approx` if neither sees anything standing out. */
+static U32 SpFindExact(U32 approx)
+{
+    U32 low = approx - SP_FIND_BELOW;
+    U32 high = approx + SP_FIND_ABOVE;
+    U32 freq, best[2];
+    U16 reading, top, bottom;
+    U8  pass, found = TRUE;
+    U16 i, points;
+
+    if(low < SP_RX_MIN)
+    {
+        low = SP_RX_MIN;
+    }
+    if(high > SP_RX_MAX)
+    {
+        high = SP_RX_MAX;
+    }
+    points = (U16)((high - low) / SP_FIND_STEP) + 1;
+
+    LCD_ClearWorkArea();
+    SpShowText(28, 24, "BUSCANDO", FONTSIZE_16x16);
+    LCD_UpdateWorkAre();
+
+    for(pass = 0; pass < 2; pass++)
+    {
+        top = 0;
+        bottom = 0xFFFF;
+        best[pass] = approx;
+        SpTune(pass ? high : low);
+        DelayMs(SP_FIND_WAIT);
+        for(i = 0; i < points; i++)
+        {
+            SpServiceTasks();
+            freq = pass ? high - SP_FIND_STEP * i : low + SP_FIND_STEP * i;
+            SpTune(freq);
+            DelayMs(SP_SETTLE_MS);
+            reading = Rfic_GetRssiVal();
+            if(reading > top)
+            {
+                top = reading;
+                best[pass] = freq;
+            }
+            if(reading < bottom)
+            {
+                bottom = reading;
+            }
+        }
+        if(top - bottom < 2)
+        {
+            found = FALSE;
+        }
+    }
+    if(!found)
+    {
+        return approx;
+    }
+    /* On the 5 kHz grid of the arrows. */
+    freq = (best[0] + best[1]) / 2;
+    return (freq + SP_LISTEN_STEP / 2) / SP_LISTEN_STEP * SP_LISTEN_STEP;
+}
+
+static void SpListenTune(U32 freq)
+{
+    /* The same choice normal reception makes: the air band and forced AM are AM. */
+    Rfic_SwitchFM_AM(Rfic_IsAmRx(freq) ? ModeAM : ModeFM);
+    SpTune(freq);
+    Rfic_SetScramble(0, freq);
+    Rfic_SetAfout(ON);
+}
+
+static void SpListenDraw(U32 freq)
+{
+    String text[16];
+
+    LCD_ClearWorkArea();
+    sprintf(text, "ESCUCHA %s", Rfic_IsAmRx(freq) ? "AM" : "FM");
+    SpShowText(9, 0, text, FONTSIZE_12x12);
+    sprintf(text, "%3lu.%03lu", freq / 100000UL, (freq % 100000UL) / 100UL);
+    SpShowText(20, 36, text, FONTSIZE_16x16);
+    SpShowText(50, 0, "FLECHAS AJUSTAN  EXIT", FONTSIZE_12x12);
+}
+
+static void SpListenBar(void)
+{
+    U16 rssi = Rfic_GetRssiVal();
+    U8  x, width;
+
+    if(rssi <= SP_RSSI_LOW)
+    {
+        width = 0;
+    }
+    else if(rssi >= SP_RSSI_HIGH)
+    {
+        width = SP_BAR_WIDTH - 2;
+    }
+    else
+    {
+        width = (U8)((rssi - SP_RSSI_LOW) * (SP_BAR_WIDTH - 2) / (SP_RSSI_HIGH - SP_RSSI_LOW));
+    }
+    for(x = 0; x < SP_BAR_WIDTH; x++)
+    {
+        gLcdBuffer[SP_BAR_PAGE][SP_BAR_LEFT + x] = (x == 0 || x == SP_BAR_WIDTH - 1 || x <= width) ? 0xFF : 0x81;
+    }
+    LCD_UpdateWorkAre();
+}
+
+/* Opens the audio on one frequency whatever the squelch and tones say, like monitor mode. */
+static void SpListen(U32 freq, U16 normalAgc)
+{
+    U8 tick, key;
+
+    Rfic_WriteWord(SP_AGC_REG, normalAgc);
+    Rfic_SetToneFreq(0);
+    Rfic_WriteWord(0x70, 0x0000);
+    SpListenTune(freq);
+    LedRxSwitch(LED_ON);
+    SpeakerSwitch(ON);
+    SpListenDraw(freq);
+    SpListenBar();
+
+    while(1)
+    {
+        tick = g_100msFlag;
+        SpServiceTasks();
+        if(tick)
+        {
+            SpListenBar();
+        }
+        if(g_keyScan.keyEvent == KEYID_NONE)
+        {
+            continue;
+        }
+        key = Key_GetRealEvent();
+        if(key == KEYID_EXIT || key == KEYID_MENU)
+        {
+            break;
+        }
+        if(key == KEYID_UP || key == KEYID_UP_CONTINUE)
+        {
+            if(freq + SP_LISTEN_STEP >= SP_RX_MAX)
+            {
+                continue;
+            }
+            freq += SP_LISTEN_STEP;
+        }
+        else if(key == KEYID_DOWN || key == KEYID_DOWN_CONTINUE)
+        {
+            if(freq < SP_RX_MIN + SP_LISTEN_STEP)
+            {
+                continue;
+            }
+            freq -= SP_LISTEN_STEP;
+        }
+        else
+        {
+            continue;
+        }
+        SpListenTune(freq);
+        SpListenDraw(freq);
+        SpListenBar();
+    }
+
+    SpeakerSwitch(OFF);
+    Rfic_SetAfout(OFF);
+    LedRxSwitch(LED_OFF);
+    Rfic_SwitchFM_AM(ModeFM);
+    Rfic_WriteWord(SP_AGC_REG, (normalAgc & SP_AGC_MASK) | SP_AGC_FIXED);
+    /* The next sweep starts around what was just heard. */
+    spCenter = freq;
+    SpClampCenter();
 }
 
 extern void EnterSpectrumMode(void)
@@ -261,6 +468,26 @@ extern void EnterSpectrumMode(void)
         if(action == SP_EXIT)
         {
             break;
+        }
+        if(action == SP_PEAK)
+        {
+            if(spSpanIdx > 0)
+            {
+                /* Too wide to search in one go: first closer, keeping the signal in view. */
+                spCenter = spShownPeak;
+                if(spHasPeak)
+                {
+                    spCenter -= spSpanTab[spSpanIdx] / SP_ZOOM_SHIFT_DIV;
+                }
+                spSpanIdx--;
+                SpClampCenter();
+            }
+            else
+            {
+                SpListen(spHasPeak ? SpFindExact(spShownPeak) : spShownPeak, savedAgc);
+                DelayMs(SP_START_WAIT);
+            }
+            action = SP_RESTART;
         }
         if(action == SP_KEEP_GOING)
         {
