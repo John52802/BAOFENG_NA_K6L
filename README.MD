@@ -51,5 +51,3 @@ Si existen `out/bf_uvk6-rx-spectrum.bin` y `out/voces_es_gonzalo/voces_es.bin`, 
 ## Licencia
 
 Este trabajo deriva del código abierto de Baofeng y se distribuye bajo el acuerdo de [LICENSE](LICENSE) (BFPL-1.0): uso personal y no comercial, conservando el acuerdo y el aviso de copyright, y cumpliendo la normativa de radio.
-
-Copyright © 2024 Baofeng. All rights reserved.
